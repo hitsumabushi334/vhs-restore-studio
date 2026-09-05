@@ -2,6 +2,17 @@
   "name": "Balanced AI",
   "description": "Moderate restoration with optional Vulkan AI upscaling.",
   "deinterlace": "auto",
+  "qtgmc_preset": "balanced",
+  "denoise_strength": 0.2,
+  "chroma_repair_strength": 0.25,
+  "artifact_removal_strength": 0.15,
+  "sharpen_strength": 0.05,
+  "stabilization": false,
   "ai_upscale": true,
-  "ai_model": "realesrgan-x4plus"
+  "ai_backend": "realesrgan-ncnn-vulkan",
+  "ai_model": "realesrgan-x4plus",
+  "ai_scale": 2,
+  "preserve_aspect": true,
+  "aspect_mode": "preserve_4_3",
+  "output_profile": "archive_practical"
 }
