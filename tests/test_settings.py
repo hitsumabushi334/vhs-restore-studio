@@ -82,6 +82,18 @@ def test_preset_files_have_the_complete_settings_schema():
         assert required <= set(json.loads(path.read_text(encoding="utf-8")))
 
 
+@pytest.mark.parametrize(
+    "field",
+    ("deinterlace", "qtgmc_preset", "ai_backend", "aspect_mode", "output_profile"),
+)
+def test_from_mapping_rejects_non_string_enum_values_with_value_error(field):
+    values = load_preset("natural").to_dict()
+    values[field] = []
+
+    with pytest.raises(ValueError):
+        RestoreSettings.from_mapping(values)
+
+
 def test_validate_settings_warns_about_combined_over_processing():
     settings = RestoreSettings(
         name="Custom",
@@ -143,4 +155,3 @@ def test_validate_settings_returns_no_warnings_for_natural_progressive_input():
     )
 
     assert validate_settings(settings, analysis) == []
-

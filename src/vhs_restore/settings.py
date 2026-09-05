@@ -146,8 +146,12 @@ def _validate_preset_values(settings: RestoreSettings) -> None:
         raise ValueError("preset name must be a non-empty string")
     if not isinstance(settings.description, str):
         raise ValueError("preset description must be a string")
+    if not isinstance(settings.deinterlace, str):
+        raise ValueError("deinterlace must be a string")
     if settings.deinterlace not in _DEINTERLACE_MODES:
         raise ValueError(f"invalid deinterlace mode: {settings.deinterlace!r}")
+    if not isinstance(settings.qtgmc_preset, str):
+        raise ValueError("qtgmc_preset must be a string")
     if settings.qtgmc_preset not in _QTGMC_PRESETS:
         raise ValueError(f"invalid QTGMC preset: {settings.qtgmc_preset!r}")
     for field in (
@@ -165,6 +169,8 @@ def _validate_preset_values(settings: RestoreSettings) -> None:
         raise ValueError("stabilization must be a boolean")
     if not isinstance(settings.ai_upscale, bool):
         raise ValueError("ai_upscale must be a boolean")
+    if not isinstance(settings.ai_backend, str):
+        raise ValueError("ai_backend must be a string")
     if settings.ai_backend not in _AI_BACKENDS:
         raise ValueError(f"invalid AI backend: {settings.ai_backend!r}")
     if settings.ai_model is not None and not isinstance(settings.ai_model, str):
@@ -175,8 +181,12 @@ def _validate_preset_values(settings: RestoreSettings) -> None:
         raise ValueError("ai_scale must be one of 1, 2, or 4")
     if not isinstance(settings.preserve_aspect, bool):
         raise ValueError("preserve_aspect must be a boolean")
+    if not isinstance(settings.aspect_mode, str):
+        raise ValueError("aspect_mode must be a string")
     if settings.aspect_mode not in _ASPECT_MODES:
         raise ValueError(f"invalid aspect mode: {settings.aspect_mode!r}")
+    if not isinstance(settings.output_profile, str):
+        raise ValueError("output_profile must be a string")
     if settings.output_profile not in _OUTPUT_PROFILES:
         raise ValueError(f"invalid output profile: {settings.output_profile!r}")
 
