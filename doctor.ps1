@@ -2,6 +2,18 @@
 param()
 
 $ErrorActionPreference = "Stop"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".")).Path
+$VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+
+function Test-VenvPython {
+    if (Test-Path -LiteralPath $VenvPython) {
+        Write-Host "[OK]      python (venv)  $VenvPython"
+        return $true
+    }
+
+    Write-Host "[MISSING] python (venv)  required; run .\setup.ps1 first"
+    return $false
+}
 
 function Test-Tool {
     param(
@@ -26,7 +38,7 @@ function Test-Tool {
 }
 
 $Ok = $true
-$Ok = (Test-Tool -Name "python" -Required $true) -and $Ok
+$Ok = (Test-VenvPython) -and $Ok
 $Ok = (Test-Tool -Name "ffmpeg" -Required $true) -and $Ok
 $Ok = (Test-Tool -Name "ffprobe" -Required $true) -and $Ok
 $Ok = (Test-Tool -Name "vspipe" -Required $false) -and $Ok

@@ -1,0 +1,6 @@
+{
+  "name": "Natural",
+  "description": "Fidelity-first restoration with conservative processing.",
+  "deinterlace": "auto",
+  "ai_upscale": false
+}

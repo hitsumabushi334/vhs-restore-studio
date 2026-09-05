@@ -5,6 +5,28 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".")).Path
 $VenvPath = Join-Path $ProjectRoot ".venv"
 
+function Assert-PythonVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath
+    )
+
+    $VersionText = & $PythonPath -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to determine the fallback Python version."
+    }
+
+    try {
+        $PythonVersion = [version]::Parse($VersionText.Trim())
+    } catch {
+        throw "Unable to parse the fallback Python version: $VersionText"
+    }
+
+    if (($PythonVersion.Major -lt 3) -or (($PythonVersion.Major -eq 3) -and ($PythonVersion.Minor -lt 12))) {
+        throw "Python 3.12 or newer is required; found $PythonVersion."
+    }
+}
+
 $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
 if ($null -ne $PyLauncher) {
     if (-not (Test-Path -LiteralPath $VenvPath)) {
@@ -18,6 +40,7 @@ if ($null -ne $PyLauncher) {
     if ($null -eq $Python) {
         throw "Python 3.12 or newer is required."
     }
+    Assert-PythonVersion -PythonPath $Python.Source
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         & $Python.Source -m venv $VenvPath
         if ($LASTEXITCODE -ne 0) {
