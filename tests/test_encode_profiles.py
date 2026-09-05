@@ -13,8 +13,9 @@ def _analysis(
     duration: float = 7200.0,
     frame_rate: float = 30000 / 1001,
     field_order: str | None = "TFF",
+    classification: str | None = None,
 ) -> SourceInfo:
-    classification = field_order or "Progressive"
+    classification = classification or field_order or "Progressive"
     return SourceInfo(
         path=Path("日本語 capture (raw) [01].avi"),
         duration=duration,
@@ -110,6 +111,90 @@ def test_dvd_uses_progressive_output_without_field_pairing_for_2997p_source():
 
     assert "tinterlace=" not in _option(args, "-vf")
     assert _option(args, "-r") == "30000/1001"
+
+
+def test_archive_keeps_actual_5994p_progressive_source_at_5994p():
+    args = build_encode_args(
+        "archive_practical",
+        _analysis(
+            frame_rate=60000 / 1001,
+            field_order="Progressive",
+            classification="Progressive",
+        ),
+        _settings("archive_practical"),
+    )
+
+    assert _option(args, "-r") == "60000/1001"
+
+
+def test_dvd_packs_actual_5994p_progressive_source_into_explicit_tff_fields():
+    args = build_encode_args(
+        "dvd",
+        _analysis(
+            frame_rate=60000 / 1001,
+            field_order="Progressive",
+            classification="Progressive",
+        ),
+        _settings("dvd"),
+    )
+
+    assert _option(args, "-r") == "30000/1001"
+    assert _option(args, "-vf") == "tinterlace=interleave_top"
+    assert _option(args, "-top") == "1"
+
+
+@pytest.mark.parametrize("mode", ["off", "progressive"])
+def test_deinterlace_disabled_keeps_2997_tff_at_2997p(mode: str):
+    settings = RestoreSettings(deinterlace=mode, output_profile="archive_practical")
+
+    args = build_encode_args("archive_practical", _analysis(), settings)
+    dvd_args = build_encode_args(
+        "dvd",
+        _analysis(),
+        RestoreSettings(deinterlace=mode, output_profile="dvd"),
+    )
+
+    assert _option(args, "-r") == "30000/1001"
+    assert _option(dvd_args, "-r") == "30000/1001"
+    assert "tinterlace=" not in _option(dvd_args, "-vf")
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_rate", "expected_interleave", "expected_top"),
+    [
+        ("tff", "60000/1001", "tinterlace=interleave_top", "1"),
+        ("bff", "60000/1001", "tinterlace=interleave_bottom", "0"),
+    ],
+)
+def test_forced_deinterlace_controls_progressive_2997_cadence(
+    mode: str,
+    expected_rate: str,
+    expected_interleave: str,
+    expected_top: str,
+):
+    analysis = _analysis(
+        field_order="Progressive",
+        classification="Progressive",
+    )
+    settings = RestoreSettings(deinterlace=mode, output_profile="dvd")
+
+    archive_args = build_encode_args("archive_practical", analysis, settings)
+    dvd_args = build_encode_args("dvd", analysis, settings)
+
+    assert _option(archive_args, "-r") == expected_rate
+    assert expected_interleave in _option(dvd_args, "-vf")
+    assert _option(dvd_args, "-top") == expected_top
+
+
+@pytest.mark.parametrize("classification", ["Unknown", "Mixed"])
+def test_dvd_rejects_unresolved_field_order(classification: str):
+    analysis = _analysis(
+        field_order=None,
+        classification=classification,
+    )
+
+    with pytest.raises(ValueError, match="field order"):
+        build_encode_args("dvd", analysis, _settings("dvd"))
 
 
 def test_dvd_rejects_missing_duration_needed_for_bitrate_planning():

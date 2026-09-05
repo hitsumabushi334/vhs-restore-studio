@@ -8,6 +8,7 @@ from vhs_restore.analysis.interlace import normalize_field_order
 from vhs_restore.analysis.source_info import SourceInfo
 from vhs_restore.settings import RestoreSettings
 
+from .deinterlace import DeinterlaceDecision, decide_deinterlace
 from .dvd import plan_dvd_video_bitrate
 
 
@@ -42,65 +43,134 @@ def _frame_rate(analysis: SourceInfo) -> float | None:
     return rate if math.isfinite(rate) and rate > 0.0 else None
 
 
-def _field_order(analysis: SourceInfo) -> str | None:
-    value = normalize_field_order(analysis.field_order)
-    if value in {"TFF", "BFF", "Progressive"}:
-        return value
-    interlace = analysis.interlace
-    if interlace is not None:
-        value = normalize_field_order(interlace.classification)
-        if value in {"TFF", "BFF", "Progressive"}:
-            return value
-    return None
-
-
 def _close_to(value: float | None, target: float) -> bool:
     return value is not None and math.isclose(value, target, rel_tol=0.0, abs_tol=0.02)
 
 
-def _restored_frame_rate(analysis: SourceInfo) -> str | None:
-    """Return the expected output rate after the shared restore decision."""
+def _analysis_classification(analysis: SourceInfo) -> str | None:
+    """Return the same classification vocabulary used by deinterlace."""
 
-    rate = _frame_rate(analysis)
-    order = _field_order(analysis)
-    if _close_to(rate, _NTSC_FPS) and order in {"TFF", "BFF"}:
-        return "60000/1001"
+    if analysis.interlace is not None:
+        value = analysis.interlace.classification
+    else:
+        value = analysis.field_order
+    if value is None:
+        return None
+
+    normalized = normalize_field_order(str(value))
+    if normalized is not None:
+        return normalized
+    value = str(value).strip()
+    if value.casefold() == "mixed":
+        return "Mixed"
+    if value.casefold() == "unknown":
+        return "Unknown"
+    return value.upper() or None
+
+
+def _resolve_deinterlace(
+    analysis: SourceInfo,
+    settings: RestoreSettings,
+) -> DeinterlaceDecision:
+    """Resolve cadence from the shared settings-aware pipeline decision."""
+
+    return decide_deinterlace(analysis, settings, qtgmc_available=True)
+
+
+def _frame_rate_argument(rate: float | None) -> str | None:
+    if rate is None:
+        return None
     if _close_to(rate, _NTSC_DOUBLE_RATE_FPS):
         return "60000/1001"
     if _close_to(rate, _NTSC_FPS):
         return "30000/1001"
-    return None if rate is None else f"{rate:g}"
+    return f"{rate:g}"
 
 
-def _dvd_field_order(analysis: SourceInfo) -> str:
-    return _field_order(analysis) if _field_order(analysis) in {"TFF", "BFF"} else "TFF"
+def _restored_frame_rate(
+    analysis: SourceInfo,
+    settings: RestoreSettings | None = None,
+    decision: DeinterlaceDecision | None = None,
+) -> str | None:
+    """Return the expected output rate after the shared restore decision."""
+
+    settings = settings or RestoreSettings()
+    decision = decision or _resolve_deinterlace(analysis, settings)
+    rate = decision.output_frame_rate
+    if rate is None:
+        rate = _frame_rate(analysis)
+    return _frame_rate_argument(rate)
 
 
-def _needs_dvd_field_pairing(analysis: SourceInfo) -> bool:
+def _dvd_field_order(
+    analysis: SourceInfo,
+    settings: RestoreSettings,
+    decision: DeinterlaceDecision,
+    *,
+    required: bool,
+) -> str | None:
+    """Resolve DVD dominance without silently guessing uncertain source order."""
+
+    requested_mode = str(settings.deinterlace).strip().casefold()
+    if requested_mode in {"tff", "bff"}:
+        return requested_mode.upper()
+
+    classification = _analysis_classification(analysis)
+    if classification in {None, "Unknown", "Mixed"}:
+        raise ValueError(
+            "DVD encoding requires a known TFF or BFF field order; "
+            f"analysis reported {classification or 'missing'}"
+        )
+    if classification == "Progressive":
+        # Progressive input has no source dominance to preserve.  NTSC DVD
+        # still needs an explicit dominance when 59.94p is packed into fields.
+        return "TFF" if required else None
+    if classification in {"TFF", "BFF"}:
+        return classification
+    if decision.field_order in {"TFF", "BFF"}:
+        return decision.field_order
+    raise ValueError(
+        "DVD encoding requires a resolved TFF or BFF field order; "
+        f"analysis reported {classification}"
+    )
+
+
+def _needs_dvd_field_pairing(
+    analysis: SourceInfo,
+    settings: RestoreSettings | None = None,
+    decision: DeinterlaceDecision | None = None,
+) -> bool:
     """Whether the restored stream is expected to be 59.94p."""
 
-    rate = _frame_rate(analysis)
-    order = _field_order(analysis)
-    if _close_to(rate, _NTSC_DOUBLE_RATE_FPS):
-        return True
-    return _close_to(rate, _NTSC_FPS) and order in {"TFF", "BFF"}
+    settings = settings or RestoreSettings()
+    decision = decision or _resolve_deinterlace(analysis, settings)
+    return _close_to(decision.output_frame_rate, _NTSC_DOUBLE_RATE_FPS)
 
 
-def _build_dvd_args(analysis: SourceInfo) -> list[str]:
-    field_order = _dvd_field_order(analysis)
-    interleave = "top" if field_order == "TFF" else "bottom"
-    top_field = "1" if field_order == "TFF" else "0"
+def _build_dvd_args(
+    analysis: SourceInfo,
+    settings: RestoreSettings,
+    decision: DeinterlaceDecision,
+) -> list[str]:
+    needs_pairing = _needs_dvd_field_pairing(analysis, settings, decision)
+    field_order = _dvd_field_order(
+        analysis,
+        settings,
+        decision,
+        required=needs_pairing,
+    )
     duration = analysis.duration
     if duration is None:
         raise ValueError("duration is required for the DVD bitrate planner")
 
     bitrate = plan_dvd_video_bitrate(duration)
-    video_filter = (
-        f"tinterlace=interleave_{interleave}"
-        if _needs_dvd_field_pairing(analysis)
-        else "format=yuv420p"
-    )
-    return [
+    if needs_pairing:
+        interleave = "top" if field_order == "TFF" else "bottom"
+        video_filter = f"tinterlace=interleave_{interleave}"
+    else:
+        video_filter = "format=yuv420p"
+
+    args = [
         "-target",
         "ntsc-dvd",
         "-f",
@@ -125,8 +195,6 @@ def _build_dvd_args(analysis: SourceInfo) -> list[str]:
         "1835008",
         "-flags",
         "+ilme+ildct",
-        "-top",
-        top_field,
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -138,6 +206,11 @@ def _build_dvd_args(analysis: SourceInfo) -> list[str]:
         "-ac",
         "2",
     ]
+    if field_order is not None:
+        top_field = "1" if field_order == "TFF" else "0"
+        insert_at = args.index("-pix_fmt")
+        args[insert_at:insert_at] = ["-top", top_field]
+    return args
 
 
 def build_encode_args(
@@ -157,8 +230,9 @@ def build_encode_args(
         raise TypeError("settings must be a RestoreSettings instance")
 
     selected = _profile_name(profile)
+    decision = _resolve_deinterlace(analysis, settings)
     if selected == "dvd":
-        return _build_dvd_args(analysis)
+        return _build_dvd_args(analysis, settings, decision)
 
     if selected == "archive_hq":
         args = [
@@ -220,7 +294,7 @@ def build_encode_args(
             "+faststart",
         ]
 
-    output_rate = _restored_frame_rate(analysis)
+    output_rate = _restored_frame_rate(analysis, settings, decision)
     if output_rate is not None:
         args.extend(["-r", output_rate])
     return args
