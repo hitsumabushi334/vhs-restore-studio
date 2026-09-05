@@ -119,18 +119,32 @@ def _dependency_qtgmc_available() -> tuple[bool, str | None]:
     return bool(available), None
 
 
+def _append_warning(warnings: list[str], warning: str) -> None:
+    """Append a warning once, collapsing duplicate QTGMC fallback messages."""
+
+    if warning in warnings:
+        return
+    if warning.casefold().startswith("qtgmc unavailable") and any(
+        existing.casefold().startswith("qtgmc unavailable") for existing in warnings
+    ):
+        return
+    warnings.append(warning)
+
+
 def build_pipeline(
     settings: RestoreSettings,
     analysis: SourceInfo,
     *,
     start: float | None = None,
     duration: float | None = None,
+    output: Path | None = None,
 ) -> PipelinePlan:
     """Build the one filter plan used by both preview and full restore.
 
-    ``start`` and ``duration`` are window metadata only.  They are deliberately
-    not interpolated into any filter expression or QTGMC script, so preview
-    and full restore cannot drift into different restoration settings.
+    ``start``, ``duration``, and ``output`` are plan metadata only.  They are
+    deliberately not interpolated into any filter expression or QTGMC script,
+    so preview and full restore cannot drift into different restoration
+    settings.
     """
 
     if not isinstance(settings, RestoreSettings):
@@ -140,6 +154,7 @@ def build_pipeline(
 
     normalized_start = _window_value(start, name="start", allow_zero=True)
     normalized_duration = _window_value(duration, name="duration", allow_zero=False)
+    normalized_output = None if output is None else Path(output)
 
     provisional = decide_deinterlace(
         analysis,
@@ -164,8 +179,9 @@ def build_pipeline(
     filters: list[str] = []
     stages: list[str] = []
     if decision.enabled:
-        filters.append(decision.filter_expression or "qtgmc")
         stages.append("deinterlace")
+        if decision.filter_expression is not None:
+            filters.append(decision.filter_expression)
     filters.extend(restore_filters)
     if settings.denoise_strength > 0.0:
         stages.append("denoise")
@@ -181,9 +197,9 @@ def build_pipeline(
 
     warnings: list[str] = []
     if dependency_warning is not None:
-        warnings.append(dependency_warning)
-    if decision.warning is not None and decision.warning not in warnings:
-        warnings.append(decision.warning)
+        _append_warning(warnings, dependency_warning)
+    if decision.warning is not None:
+        _append_warning(warnings, decision.warning)
 
     return PipelinePlan(
         source=Path(analysis.path),
@@ -195,6 +211,7 @@ def build_pipeline(
         stages=tuple(stages),
         start=normalized_start,
         duration=normalized_duration,
+        output=normalized_output,
         output_frame_rate=decision.output_frame_rate,
         aspect_ratio="4:3",
         preserve_aspect=True,
@@ -203,4 +220,3 @@ def build_pipeline(
         settings=settings,
         analysis=analysis,
     )
-

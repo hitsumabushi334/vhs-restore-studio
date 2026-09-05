@@ -35,8 +35,16 @@ def test_preview_and_full_builds_share_the_same_filter_graph(monkeypatch: pytest
     )
     analysis = _interlaced_source()
 
-    full = build_pipeline(settings, analysis)
-    preview = build_pipeline(settings, analysis, start=12.5, duration=10.0)
+    full_output = Path("outputs/full.mp4")
+    preview_output = Path("outputs/preview.mp4")
+    full = build_pipeline(settings, analysis, output=full_output)
+    preview = build_pipeline(
+        settings,
+        analysis,
+        start=12.5,
+        duration=10.0,
+        output=preview_output,
+    )
 
     assert isinstance(full.filters, tuple)
     assert preview.filters == full.filters
@@ -49,8 +57,27 @@ def test_preview_and_full_builds_share_the_same_filter_graph(monkeypatch: pytest
     assert full.duration is None
     assert preview.start == pytest.approx(12.5)
     assert preview.duration == pytest.approx(10.0)
-    assert preview.output is None
-    assert full.output is None
+    assert preview.output == preview_output
+    assert full.output == full_output
+    assert preview.output_path == preview_output
+    assert full.output_path == full_output
+
+
+def test_qtgmc_stage_is_not_emitted_as_an_ffmpeg_filter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        pipeline,
+        "detect_dependencies",
+        lambda: SimpleNamespace(qtgmc_available=True),
+    )
+
+    plan = build_pipeline(RestoreSettings(), _interlaced_source())
+
+    assert plan.deinterlace.method == "qtgmc"
+    assert plan.qtgmc_script is not None
+    assert "qtgmc" not in plan.ffmpeg_filters.casefold()
+    assert all("qtgmc" not in expression.casefold() for expression in plan.filters)
 
 
 def test_pipeline_uses_bwdif_filter_and_surfaces_qtgmc_fallback_warning(
@@ -69,6 +96,22 @@ def test_pipeline_uses_bwdif_filter_and_surfaces_qtgmc_fallback_warning(
     assert any("QTGMC unavailable" in warning for warning in plan.warnings)
 
 
+def test_pipeline_deduplicates_qtgmc_fallback_warnings_on_dependency_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def raise_dependency_error():
+        raise RuntimeError("dependency probe failed")
+
+    monkeypatch.setattr(pipeline, "detect_dependencies", raise_dependency_error)
+
+    plan = build_pipeline(RestoreSettings(), _interlaced_source())
+
+    qtgmc_warnings = [
+        warning for warning in plan.warnings if "QTGMC unavailable" in warning
+    ]
+    assert len(qtgmc_warnings) == 1
+
+
 def test_pipeline_preserves_4_3_without_a_16_9_stretch():
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
@@ -85,4 +128,3 @@ def test_pipeline_preserves_4_3_without_a_16_9_stretch():
     assert plan.preserve_aspect is True
     assert "16:9" not in plan.filter_graph
     assert "setdar=4/3" in plan.filter_graph
-

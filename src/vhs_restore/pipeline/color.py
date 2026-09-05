@@ -15,7 +15,7 @@ def build_color_filters(settings: RestoreSettings) -> tuple[str, ...]:
     """Return color/aspect filters that never stretch 4:3 content to 16:9."""
 
     if settings.aspect_mode == "pillarbox_16_9":
-        scale, pad = _scaled_and_padded(1440, 1080)
+        scale, _ = _scaled_and_padded(1440, 1080)
         return (
             scale,
             "setsar=1",
@@ -32,4 +32,3 @@ def build_color_filters(settings: RestoreSettings) -> tuple[str, ...]:
 
 
 build_color_stage = build_color_filters
-
