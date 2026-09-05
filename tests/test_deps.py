@@ -41,6 +41,202 @@ def test_detect_dependencies_finds_ffmpeg_and_records_version(
     assert report.expected_versions["ffmpeg"] == "8.1.1-full (Gyan)"
 
 
+def test_detect_dependencies_finds_ffprobe_and_reports_qtgmc_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe", "vspipe"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        if "--info" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="ModuleNotFoundError: No module named 'havsfunc'\n",
+                stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 1.0.0\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    assert report.ffprobe == Path("C:/tools/ffprobe.exe")
+    assert report.tools["ffprobe"].available is True
+    assert report.tools["vspipe"].found is True
+    assert report.tools["vspipe"].available is True
+    assert report.qtgmc_available is False
+    assert any(
+        "QTGMC unavailable" in message and "bwdif" in message
+        for message in report.messages
+    )
+
+
+def test_found_but_unusable_required_tool_is_not_available_and_error_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        if Path(argv[0]).stem == "ffmpeg":
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="ffmpeg failed to start\n",
+                stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="ffprobe version 8.1.1\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    ffmpeg = report.tools["ffmpeg"]
+    assert ffmpeg.found is True
+    assert ffmpeg.available is False
+    assert "ffmpeg" in report.required_missing
+    assert report.ready is False
+    assert ffmpeg.error == "ffmpeg failed to start"
+    assert "ffmpeg failed to start" in deps._format_status(ffmpeg)
+    assert any("ffmpeg failed to start" in message for message in report.messages)
+
+
+def test_video2x_is_not_an_ai_backend_without_a_vulkan_capability_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe", "video2x"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        if "--list-gpus" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="No Vulkan devices found\n",
+                stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 6.4.0\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    assert report.tools["video2x"].available is True
+    assert report.tools["video2x"].capability_available is False
+    assert report.selected_ai_backend is None
+    assert report.ai_backend_available is False
+    assert any("Vulkan" in message for message in report.messages)
+    assert any("AI backend unavailable" in message for message in report.messages)
+
+
+def test_video2x_selected_backend_is_recorded_after_vulkan_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe", "video2x"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        if "--list-gpus" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="0. AMD Radeon\n    Vulkan API Version: 1.3.280\n",
+                stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 6.4.0\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    assert report.tools["video2x"].capability_available is True
+    assert report.selected_ai_backend == "video2x"
+    assert report.ai_backend_available is True
+
+
+def test_expected_version_mismatch_is_reported_without_marking_tool_broken(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        version = "7.0.0" if Path(argv[0]).stem == "ffmpeg" else "8.1.1"
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version {version}\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    ffmpeg = report.tools["ffmpeg"]
+    assert ffmpeg.available is True
+    assert ffmpeg.version_matches is False
+    assert any("ffmpeg version mismatch" in message for message in report.messages)
+
+
+def test_extract_version_scans_all_lines_and_accepts_common_prefixes():
+    deps = _load_deps_module()
+
+    assert deps._extract_version("banner\nVideo2X version: 6.4.0\n") == "6.4.0"
+    assert deps._extract_version("build info\nrelease v0.2.0 (Vulkan)\n") == "v0.2.0"
+
+
 def test_detect_dependencies_reports_missing_ai_backend_without_failing(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -51,6 +247,16 @@ def test_detect_dependencies_reports_missing_ai_backend_without_failing(
         deps,
         "find_tool",
         lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+    monkeypatch.setattr(
+        deps,
+        "run_command",
+        lambda argv, **_: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 1.0.0\n",
+            stderr=None,
+        ),
     )
 
     report = deps.detect_dependencies()
@@ -73,6 +279,16 @@ def test_detect_dependencies_marks_a_vulkan_ai_backend_available(
         deps,
         "find_tool",
         lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+    monkeypatch.setattr(
+        deps,
+        "run_command",
+        lambda argv, **_: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 1.0.0\n",
+            stderr=None,
+        ),
     )
 
     report = deps.detect_dependencies()
