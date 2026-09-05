@@ -64,4 +64,19 @@ if ($LASTEXITCODE -ne 0) {
     throw "Editable package installation failed."
 }
 
+$VenvScripts = Split-Path -Parent $VenvPython
+$env:PATH = "$VenvScripts;$env:PATH"
+$SourceRoot = Join-Path $ProjectRoot "src"
+if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
+    $env:PYTHONPATH = $SourceRoot
+} else {
+    $env:PYTHONPATH = "$SourceRoot;$env:PYTHONPATH"
+}
+
+Write-Host "Running dependency diagnostics."
+& $VenvPython -m vhs_restore.utils.deps
+if ($LASTEXITCODE -ne 0) {
+    throw "Required local dependencies are missing; run .\doctor.ps1 for details."
+}
+
 Write-Host "VHS Restore Studio environment ready: $VenvPath"
