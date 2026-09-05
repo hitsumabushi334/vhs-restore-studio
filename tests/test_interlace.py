@@ -90,6 +90,26 @@ def test_analyze_interlace_classifies_a_single_sample_with_both_field_orders_as_
     assert analysis.classification == "Mixed"
 
 
+def test_analyze_interlace_classifies_unequal_nonzero_sample_evidence_as_mixed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    output = _idet_output(tff=10, bff=1, progressive=0)
+
+    def fake_run_command(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr("vhs_restore.analysis.interlace.run_command", fake_run_command)
+
+    analysis = analyze_interlace(tmp_path / "unequal-mixed.mkv", duration=10.0)
+
+    assert analysis.classification == "Mixed"
+    assert [sample.classification for sample in analysis.samples] == [
+        "Mixed",
+        "Mixed",
+        "Mixed",
+    ]
+
+
 def test_analyze_interlace_warns_when_metadata_conflicts_with_idet(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

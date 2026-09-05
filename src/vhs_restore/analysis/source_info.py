@@ -91,6 +91,11 @@ def save_analysis_json(info: SourceInfo, destination: Path) -> Path:
     """Persist ``info`` to a sidecar JSON file without touching source media."""
 
     destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # Keep every source-identity check immediately before the write.  The
+    # lexical check protects a not-yet-created destination; samefile() also
+    # catches existing hard links and symlinks to the source media.
     try:
         source_resolved = info.path.resolve()
         destination_resolved = destination.resolve()
@@ -101,7 +106,14 @@ def save_analysis_json(info: SourceInfo, destination: Path) -> Path:
     if source_resolved == destination_resolved:
         raise ValueError("analysis JSON destination must not overwrite source media")
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        try:
+            same_source = destination.samefile(info.path)
+        except FileNotFoundError:
+            same_source = False
+        if same_source:
+            raise ValueError("analysis JSON destination must not overwrite source media")
+
     destination.write_text(info.to_json() + "\n", encoding="utf-8")
     return destination
 

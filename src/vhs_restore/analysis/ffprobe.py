@@ -12,9 +12,14 @@ from vhs_restore.utils.process import run_command
 from .source_info import SourceInfo
 
 
-def _result_output(result: object) -> str:
+def _result_stdout(result: object) -> str:
+    value = getattr(result, "stdout", None)
+    return str(value) if value else ""
+
+
+def _result_diagnostics(result: object) -> str:
     chunks: list[str] = []
-    for attribute in ("stdout", "stderr"):
+    for attribute in ("stderr", "stdout"):
         value = getattr(result, attribute, None)
         if value:
             chunks.append(str(value))
@@ -95,9 +100,9 @@ def probe_source(
     except Exception as exc:
         raise RuntimeError(f"ffprobe failed for {source}: {exc}") from exc
 
-    output = _result_output(result)
+    output = _result_stdout(result)
     if getattr(result, "returncode", 0) != 0:
-        detail = " ".join(output.split())
+        detail = " ".join(_result_diagnostics(result).split())
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(
             f"ffprobe failed for {source} with exit code "

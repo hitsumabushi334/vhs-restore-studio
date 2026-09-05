@@ -41,7 +41,12 @@ def test_probe_source_parses_video_metadata_and_preserves_a_path_with_special_ch
 
     def fake_run_command(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, json.dumps(fixture), "")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(fixture),
+            "ffprobe diagnostic: ignored when JSON is valid",
+        )
 
     monkeypatch.setattr("vhs_restore.analysis.ffprobe.run_command", fake_run_command)
 
@@ -108,6 +113,25 @@ def test_source_info_refuses_the_source_path_as_the_analysis_destination(tmp_pat
 
     with pytest.raises(ValueError, match="source media"):
         save_analysis_json(info, source)
+
+
+def test_source_info_refuses_a_hard_link_to_the_source_as_the_destination(
+    tmp_path: Path,
+):
+    source = tmp_path / "source.mkv"
+    destination = tmp_path / "source.analysis.json"
+    source.write_bytes(b"source")
+    try:
+        destination.hardlink_to(source)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    info = SourceInfo(path=source, duration=1.0)
+
+    with pytest.raises(ValueError, match="source media"):
+        save_analysis_json(info, destination)
+
+    assert source.read_bytes() == b"source"
 
 
 def test_source_info_attaches_metadata_conflict_warnings_to_idet_analysis():

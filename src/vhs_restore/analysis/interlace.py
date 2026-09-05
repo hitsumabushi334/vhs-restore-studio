@@ -158,16 +158,13 @@ def _parse_idet_counts(output: str) -> tuple[int, int, int, int] | None:
 
 
 def _classify_counts(tff: int, bff: int, progressive: int) -> str:
-    detected = {value for value in (tff, bff, progressive) if value > 0}
+    values = {"TFF": tff, "BFF": bff, "Progressive": progressive}
+    detected = {name for name, value in values.items() if value > 0}
     if not detected:
         return "Unknown"
-    if tff == bff and tff > 0:
+    if len(detected) > 1:
         return "Mixed"
-    values = {"TFF": tff, "BFF": bff, "Progressive": progressive}
-    winner = max(values, key=values.get)
-    if list(values.values()).count(values[winner]) > 1:
-        return "Mixed"
-    return winner
+    return next(iter(detected))
 
 
 def _classify_samples(samples: tuple[InterlaceSample, ...]) -> tuple[str, float]:
