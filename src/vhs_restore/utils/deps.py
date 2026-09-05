@@ -361,10 +361,10 @@ def _select_ai_backend(
         realesrgan = replace(realesrgan, capability_available=True)
         statuses["realesrgan-ncnn-vulkan"] = realesrgan
 
-    if realesrgan.capability_available:
-        return realesrgan.name
     if video2x.capability_available:
         return video2x.name
+    if realesrgan.capability_available:
+        return realesrgan.name
     return None
 
 

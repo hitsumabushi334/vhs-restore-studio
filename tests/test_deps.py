@@ -199,6 +199,45 @@ def test_video2x_selected_backend_is_recorded_after_vulkan_probe(
     assert report.ai_backend_available is True
 
 
+def test_video2x_is_preferred_over_realesrgan_when_both_are_available(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {
+        "ffmpeg",
+        "ffprobe",
+        "video2x",
+        "realesrgan-ncnn-vulkan",
+    }
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        if "--list-gpus" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="0. AMD Radeon\n    Vulkan API Version: 1.3.280\n",
+                stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{Path(argv[0]).stem} version 1.0.0\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    assert report.selected_ai_backend == "video2x"
+
+
 def test_expected_version_mismatch_is_reported_without_marking_tool_broken(
     monkeypatch: pytest.MonkeyPatch,
 ):
