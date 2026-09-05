@@ -15,6 +15,11 @@ from .base import (
 )
 
 
+_IMAGE_SUFFIXES = frozenset(
+    {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RealESRGANBackend:
     """Invoke the local Real-ESRGAN ncnn Vulkan executable."""
@@ -33,6 +38,12 @@ class RealESRGANBackend:
 
         return self._executable_path() is not None
 
+    def supports_input(self, input: str | Path) -> bool:
+        """Return whether Real-ESRGAN can consume the given input directly."""
+
+        source = Path(input)
+        return source.is_dir() or source.suffix.casefold() in _IMAGE_SUFFIXES
+
     def upscale(
         self,
         input: str | Path,
@@ -43,6 +54,11 @@ class RealESRGANBackend:
         """Upscale an input path using Real-ESRGAN's Vulkan CLI."""
 
         source, destination = prepare_upscale_paths(input, output)
+        if not self.supports_input(source):
+            raise ValueError(
+                "realesrgan-ncnn-vulkan accepts image files or directories, "
+                "not video inputs"
+            )
         scale = validate_scale(scale)
         executable = self._executable_path()
         if executable is None:

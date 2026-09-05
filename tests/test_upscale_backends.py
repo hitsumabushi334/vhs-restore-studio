@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from vhs_restore.utils import deps
 from vhs_restore.upscale.base import UpscaleBackend, select_upscale_backend
 from vhs_restore.upscale.classical import ClassicalBackend
 from vhs_restore.upscale.realesrgan import RealESRGANBackend
@@ -76,6 +77,80 @@ def test_selector_degrades_to_classical_when_ai_backends_are_unavailable():
     assert selected is classical
     assert video2x.availability_checks == 1
     assert realesrgan.availability_checks == 1
+
+
+def test_video_selection_skips_realesrgan_when_video2x_is_unavailable(
+    tmp_path: Path,
+):
+    video2x = StubBackend("video2x", available=False)
+    realesrgan = StubBackend("realesrgan-ncnn-vulkan", available=True)
+    classical = StubBackend("classical", available=True)
+
+    selected = select_upscale_backend(
+        input=tmp_path / "capture.mp4",
+        video2x=video2x,
+        realesrgan=realesrgan,
+        classical=classical,
+    )
+
+    assert selected is classical
+    assert video2x.availability_checks == 1
+    assert realesrgan.availability_checks == 0
+
+
+def test_video2x_vulkan_probe_failure_falls_back_to_classical(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.find_tool",
+        lambda _: Path("C:/tools/video2x.exe"),
+    )
+    monkeypatch.setattr(
+        "vhs_restore.upscale.classical.find_tool",
+        lambda _: Path("C:/tools/ffmpeg.exe"),
+    )
+    monkeypatch.setattr(
+        deps,
+        "_probe_video2x_vulkan",
+        lambda _: (False, "no Vulkan-capable GPU reported"),
+    )
+
+    selected = select_upscale_backend(input=tmp_path / "capture.mp4")
+
+    assert isinstance(selected, ClassicalBackend)
+
+
+def test_video2x_probe_command_failure_keeps_classical_reachable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    probe_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.find_tool",
+        lambda _: Path("C:/tools/video2x.exe"),
+    )
+    monkeypatch.setattr(
+        "vhs_restore.upscale.classical.find_tool",
+        lambda _: Path("C:/tools/ffmpeg.exe"),
+    )
+
+    def failed_probe(argv: list[str], **_: object):
+        probe_calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="Video2X failed to enumerate Vulkan devices\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", failed_probe)
+
+    selected = select_upscale_backend(input=tmp_path / "capture.mp4")
+
+    assert isinstance(selected, ClassicalBackend)
+    assert probe_calls == [[str(Path("C:/tools/video2x.exe")), "--list-gpus"]]
 
 
 def test_default_selector_uses_classical_when_ai_executables_are_missing(monkeypatch):

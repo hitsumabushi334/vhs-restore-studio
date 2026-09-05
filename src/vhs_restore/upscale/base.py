@@ -9,6 +9,28 @@ from typing import Protocol, runtime_checkable
 from vhs_restore.utils.paths import safe_output_path
 
 
+_VIDEO_SUFFIXES = frozenset(
+    {
+        ".3gp",
+        ".avi",
+        ".flv",
+        ".m2ts",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".mts",
+        ".mxf",
+        ".ts",
+        ".vob",
+        ".webm",
+        ".wmv",
+    }
+)
+
+
 @runtime_checkable
 class UpscaleBackend(Protocol):
     """Common interface implemented by every local upscaling backend."""
@@ -68,9 +90,32 @@ def raise_for_command_failure(result: object, backend_name: str) -> None:
     )
 
 
+def _is_video_input(input: str | Path) -> bool:
+    return Path(input).suffix.casefold() in _VIDEO_SUFFIXES
+
+
+def _backend_supports_input(
+    backend: UpscaleBackend,
+    input: str | Path | None,
+) -> bool:
+    if input is None:
+        return True
+
+    supports_input = getattr(backend, "supports_input", None)
+    if callable(supports_input):
+        try:
+            return bool(supports_input(input))
+        except Exception:
+            return False
+
+    backend_name = str(getattr(backend, "name", "")).casefold()
+    return not (_is_video_input(input) and "realesrgan" in backend_name)
+
+
 def select_upscale_backend(
     backends: Iterable[UpscaleBackend] | None = None,
     *,
+    input: str | Path | None = None,
     video2x: UpscaleBackend | None = None,
     realesrgan: UpscaleBackend | None = None,
     classical: UpscaleBackend | None = None,
@@ -105,6 +150,8 @@ def select_upscale_backend(
         fallback = classical
 
     for backend in preferred:
+        if not _backend_supports_input(backend, input):
+            continue
         try:
             if backend.is_available():
                 return backend

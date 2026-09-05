@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from vhs_restore.utils import deps as dependency_probe
 from vhs_restore.utils.process import run_command
 from vhs_restore.utils.system import find_tool
 
@@ -29,9 +30,17 @@ class Video2XBackend:
             return None
 
     def is_available(self) -> bool:
-        """Return whether the Video2X executable can be resolved locally."""
+        """Return whether Video2X has a usable Vulkan device."""
 
-        return self._executable_path() is not None
+        executable = self._executable_path()
+        if executable is None:
+            return False
+
+        try:
+            available, _ = dependency_probe.probe_video2x_vulkan(executable)
+        except Exception:
+            return False
+        return available
 
     def upscale(
         self,

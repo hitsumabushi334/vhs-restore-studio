@@ -329,6 +329,12 @@ def _probe_video2x_vulkan(path: Path) -> tuple[bool, str | None]:
     return True, None
 
 
+def probe_video2x_vulkan(path: str | Path) -> tuple[bool, str | None]:
+    """Return whether Video2X can enumerate a usable Vulkan device."""
+
+    return _probe_video2x_vulkan(Path(path))
+
+
 def _select_ai_backend(
     statuses: dict[str, ToolStatus],
     messages: list[str],
@@ -337,7 +343,7 @@ def _select_ai_backend(
 
     video2x = statuses["video2x"]
     if video2x.available:
-        capability_available, capability_error = _probe_video2x_vulkan(
+        capability_available, capability_error = probe_video2x_vulkan(
             video2x.path  # type: ignore[arg-type]
         )
         video2x = replace(
