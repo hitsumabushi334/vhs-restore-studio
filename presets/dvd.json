@@ -1,0 +1,7 @@
+{
+  "name": "DVD",
+  "description": "DVD-compatible output while preserving correct 4:3 handling.",
+  "deinterlace": "auto",
+  "ai_upscale": false,
+  "output_profile": "dvd"
+}

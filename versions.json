@@ -1,0 +1,9 @@
+{
+  "python": ">=3.12",
+  "pyside6": ">=6.7",
+  "ffmpeg": "8.1.1-full (Gyan)",
+  "video2x": "6.4.0",
+  "realesrgan-ncnn-vulkan": "v0.2.0",
+  "vapoursynth": null,
+  "qtgmc": null
+}

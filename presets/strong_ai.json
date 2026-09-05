@@ -1,0 +1,7 @@
+{
+  "name": "Strong AI",
+  "description": "Aggressive optional AI processing; may hallucinate fine detail, including Japanese text.",
+  "deinterlace": "auto",
+  "ai_upscale": true,
+  "ai_model": "realesrgan-x4plus-anime"
+}

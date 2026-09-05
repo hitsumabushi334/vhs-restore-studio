@@ -1,0 +1,7 @@
+{
+  "name": "Balanced AI",
+  "description": "Moderate restoration with optional Vulkan AI upscaling.",
+  "deinterlace": "auto",
+  "ai_upscale": true,
+  "ai_model": "realesrgan-x4plus"
+}

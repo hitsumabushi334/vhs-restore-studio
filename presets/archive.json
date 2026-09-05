@@ -1,0 +1,7 @@
+{
+  "name": "Archive",
+  "description": "Conservative restoration for an archival master.",
+  "deinterlace": "auto",
+  "ai_upscale": false,
+  "output_profile": "archive_hq"
+}
