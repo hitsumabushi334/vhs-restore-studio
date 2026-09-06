@@ -87,26 +87,27 @@ def test_real_interlace_analysis_preserves_field_order(tmp_path: Path, maker, ex
 
 def test_progressive_5994_source_does_not_enable_deinterlace(tmp_path: Path):
     source = make_progressive_clip(tmp_path / "progressive 59.94p.mkv")
-    info = probe_source(source)
-    assert info.duration is not None
-    idet = analyze_interlace(
-        source,
-        info.duration,
-        metadata_field_order=info.field_order,
-    )
+    analysis = _analyzed(source)
+
+    assert analysis.interlace is not None
     # MPEG-4's inter-field compression can make idet report Mixed for a
-    # genuinely progressive testsrc2 stream.  Keep the authoritative
-    # progressive stream metadata when making the pipeline decision.
-    analysis = info
+    # genuinely progressive testsrc2 stream.  The progressive metadata is
+    # authoritative for this 59.94p pipeline decision.
+    assert analysis.field_order is not None
+    assert analysis.field_order.casefold() == "progressive"
+    assert analysis.interlace.classification in {"Progressive", "Mixed"}
     plan = build_pipeline(load_preset("natural"), analysis)
 
-    assert idet.classification not in {"TFF", "BFF"}
-    assert plan.deinterlace.method == "off" or not plan.deinterlace.enabled
+    assert plan.deinterlace.enabled is False
+    assert plan.deinterlace.method == "off"
     assert "tinterlace" not in plan.filter_graph
 
 
 def test_interlaced_restore_outputs_double_rate_and_archive_4_3(tmp_path: Path):
     source = make_tff_clip(tmp_path / "capture source.mkv")
+    source_stream = _video_stream(_probe_media(source))
+    assert _aspect_ratio(source_stream["display_aspect_ratio"]) == pytest.approx(4 / 3, abs=0.01)
+
     analysis = _analyzed(source)
     settings = replace(load_preset("natural"), output_profile="compatibility")
     output = tmp_path / "restored output.mp4"
@@ -198,15 +199,24 @@ def test_restore_preserves_audio_duration(tmp_path: Path):
 
     _run_restore(source, output, analysis, settings)
     output_metadata = _probe_media(output)
-    output_duration = float(output_metadata["format"]["duration"])
-    streams = output_metadata["streams"]
+    output_streams = output_metadata["streams"]
+    audio_streams = [stream for stream in output_streams if stream.get("codec_type") == "audio"]
+    video_streams = [stream for stream in output_streams if stream.get("codec_type") == "video"]
+    assert audio_streams
+    assert video_streams
+    audio_duration = float(audio_streams[0]["duration"])
+    video_duration = float(video_streams[0]["duration"])
 
-    assert any(stream.get("codec_type") == "audio" for stream in streams)
-    assert output_duration == pytest.approx(source_duration, abs=0.3)
+    assert abs(audio_duration - video_duration) < 0.15
+    assert audio_duration == pytest.approx(source_duration, abs=0.3)
+    assert video_duration == pytest.approx(source_duration, abs=0.3)
 
 
 def test_dvd_preset_encodes_ntsc_4_3_video(tmp_path: Path):
     source = make_tff_clip(tmp_path / "dvd source.mkv")
+    source_stream = _video_stream(_probe_media(source))
+    assert _aspect_ratio(source_stream["display_aspect_ratio"]) == pytest.approx(4 / 3, abs=0.01)
+
     analysis = _analyzed(source)
     output = tmp_path / "dvd restored.vob"
 
