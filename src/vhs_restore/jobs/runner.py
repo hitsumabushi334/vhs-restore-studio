@@ -844,6 +844,8 @@ class RestoreJobRunner:
                 self._ensure_partial(partial)
                 self._raise_if_cancel_failed()
                 raise _JobCancelledSignal() from exc
+            if not isinstance(exc, Exception):
+                raise
             suffix = f": {vspipe_detail}" if vspipe_detail else ""
             raise JobError(f"{stage} FFmpeg stage failed{suffix}: {exc}") from exc
         finally:

@@ -592,3 +592,52 @@ def test_qtgmc_stderr_text_does_not_reread_live_pipe():
         stderr = HangStream()
 
     assert runner_module._qtgmc_stderr_text(Proc()) == ""
+
+
+
+def test_ffmpeg_wait_keyboardinterrupt_is_not_wrapped_as_job_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    artifact = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+    runner = RestoreJobRunner()
+    work_dir = tmp_path / "job"
+    work_dir.mkdir()
+    runner._work_dir = work_dir
+    manifest = runner_module.JobManifest(source, artifact, RestoreSettings())
+
+    producer = type("Producer", (), {"returncode": None, "stdout": None, "stderr": None})()
+    producer.kill_calls = 0
+    producer._qtgmc_stderr = [b"Script evaluation failed: no havsfunc\n"]
+    producer._qtgmc_stderr_thread = None
+
+    def kill():
+        producer.kill_calls += 1
+
+    producer.kill = kill
+    monkeypatch.setattr(runner, "_run_qtgmc_stage", lambda **kwargs: producer)
+
+    def boom_wait(self, timeout=None):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(runner_module._ProcessGroup, "wait", boom_wait)
+    monkeypatch.setattr(
+        runner,
+        "_start_command",
+        lambda *args, **kwargs: type("Proc", (), {"returncode": None, "stdout": None, "kill": lambda self=None: None})(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        runner._run_ffmpeg_stage(
+            stage="deinterlace",
+            plan=plan,
+            input_path=source,
+            artifact=artifact,
+            encode_args=(),
+            manifest=manifest,
+            manifest_file=work_dir / "manifest.json",
+            duration=5.0,
+        )
