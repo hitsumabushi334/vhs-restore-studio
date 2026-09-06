@@ -1,4 +1,5 @@
 import io
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -158,6 +159,52 @@ def test_qtgmc_unexpected_vspipe_failure_does_not_promote_output(
     )
     with pytest.raises(JobError, match="vspipe exit code 1: Script evaluation failed"):
         runner.run(source, analysis, RestoreSettings(), output)
+
+    assert not output.exists()
+    assert Path(f"{output}.partial").exists()
+
+
+def test_live_vspipe_stderr_is_included_in_job_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    output = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+
+    def fake_start(argv: list[str], **kwargs):
+        if _is_vspipe_command(argv):
+            return real_start_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.buffer.write(b'Script evaluation failed: no havsfunc\\n'); sys.exit(1)",
+                ],
+                cwd=kwargs.get("cwd"),
+                on_output=None,
+                text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                capture_output=False,
+            )
+        Path(argv[-1]).write_bytes(b"encoded")
+        return real_start_command(
+            [sys.executable, "-c", "pass"],
+            cwd=kwargs.get("cwd"),
+            on_output=kwargs.get("on_output"),
+        )
+
+    monkeypatch.setattr(runner_module, "build_pipeline", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(runner_module, "build_encode_args", lambda *args, **kwargs: [])
+    runner = RestoreJobRunner(
+        job_dir=tmp_path / "job",
+        start_command_factory=fake_start,
+        free_space_checker=lambda _: 10**12,
+    )
+    with pytest.raises(JobError, match="no havsfunc") as raised:
+        runner.run(source, analysis, RestoreSettings(), output)
+    assert "vspipe" in str(raised.value).casefold() or "QTGMC" in str(raised.value)
 
     assert not output.exists()
     assert Path(f"{output}.partial").exists()
@@ -525,3 +572,23 @@ def test_qtgmc_cancellation_after_start_kills_producer_and_keeps_partial(
     assert producer.kill_calls == 1
     assert Path(f"{artifact}.partial").exists()
     assert runner.current_process is None
+
+
+def test_qtgmc_stderr_text_does_not_reread_live_pipe():
+    class AliveThread:
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return True
+
+    class HangStream:
+        def read(self):
+            raise AssertionError("must not reread live stderr")
+
+    class Proc:
+        _qtgmc_stderr_thread = AliveThread()
+        _qtgmc_stderr: list[bytes] = []
+        stderr = HangStream()
+
+    assert runner_module._qtgmc_stderr_text(Proc()) == ""

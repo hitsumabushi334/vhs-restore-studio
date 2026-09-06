@@ -175,6 +175,36 @@ def _vspipe_y4m_args(executable: str | Path) -> list[str]:
     return ["--y4m"]
 
 
+def _qtgmc_stderr_text(process: object) -> str:
+    """Return drained VSPipe stderr for QTGMC JobError messages."""
+
+    thread = getattr(process, "_qtgmc_stderr_thread", None)
+    if thread is not None:
+        join = getattr(thread, "join", None)
+        if callable(join):
+            join(timeout=5)
+
+    chunks: list[bytes] = list(getattr(process, "_qtgmc_stderr", []) or [])
+    thread_alive = bool(getattr(thread, "is_alive", lambda: False)())
+    # The drain thread owns the pipe. Never issue a second blocking read
+    # while that thread is still running.
+    if not chunks and not thread_alive:
+        stream = getattr(process, "stderr", None)
+        if stream is None:
+            stream = getattr(getattr(process, "_process", None), "stderr", None)
+        if stream is not None:
+            try:
+                leftover = stream.read()
+            except BaseException:
+                leftover = None
+            if leftover:
+                if isinstance(leftover, bytes):
+                    chunks.append(leftover)
+                else:
+                    chunks.append(str(leftover).encode("utf-8", errors="replace"))
+    return b"".join(chunks).decode("utf-8", errors="replace").strip()
+
+
 def _vspipe_exit_is_broken_pipe(returncode: int | None, stderr_text: str) -> bool:
     """Return whether a vspipe failure is the expected closed-pipe exit."""
 
@@ -665,7 +695,12 @@ class RestoreJobRunner:
                 def drain_stderr() -> None:
                     try:
                         data = stderr_stream.read()
-                    except BaseException:
+                    except BaseException as exc:
+                        qtgmc_stderr.append(
+                            f"{type(exc).__name__}: {exc}".encode(
+                                "utf-8", errors="replace"
+                            )
+                        )
                         return
                     if not data:
                         return
@@ -793,7 +828,24 @@ class RestoreJobRunner:
                 self._ensure_partial(partial)
                 self._raise_if_cancel_failed()
                 raise _JobCancelledSignal() from exc
-            raise
+            if qtgmc_process is not None:
+                try:
+                    qtgmc_process.kill()
+                except BaseException:
+                    pass
+            if self._is_cancelled():
+                self._ensure_partial(partial)
+                self._raise_if_cancel_failed()
+                raise _JobCancelledSignal() from exc
+            vspipe_detail = (
+                _qtgmc_stderr_text(qtgmc_process) if qtgmc_process is not None else ""
+            )
+            if self._is_cancelled():
+                self._ensure_partial(partial)
+                self._raise_if_cancel_failed()
+                raise _JobCancelledSignal() from exc
+            suffix = f": {vspipe_detail}" if vspipe_detail else ""
+            raise JobError(f"{stage} FFmpeg stage failed{suffix}: {exc}") from exc
         finally:
             self._clear_active(process_group)
 
@@ -801,16 +853,9 @@ class RestoreJobRunner:
             self._ensure_partial(partial)
             self._raise_if_cancel_failed()
             raise _JobCancelledSignal()
-        if qtgmc_process is not None:
-            stderr_thread = getattr(qtgmc_process, "_qtgmc_stderr_thread", None)
-            if stderr_thread is not None:
-                stderr_thread.join()
-        qtgmc_stderr = (
-            getattr(qtgmc_process, "_qtgmc_stderr", []) if qtgmc_process is not None else []
+        vspipe_detail = (
+            _qtgmc_stderr_text(qtgmc_process) if qtgmc_process is not None else ""
         )
-        vspipe_detail = b"".join(qtgmc_stderr).decode(
-            "utf-8", errors="replace"
-        ).strip()
         returncode = getattr(result, "returncode", 0)
         if returncode != 0:
             self._ensure_partial(partial)
