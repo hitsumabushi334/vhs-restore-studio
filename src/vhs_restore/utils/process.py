@@ -39,11 +39,7 @@ def _windows_pid_exists(pid: int) -> bool:
         ) from exc
 
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise ProcessTreeTerminationError(
-            f"tasklist failed while checking process {pid}"
-            + (f": {detail}" if detail else "")
-        )
+        return False
 
     for row in csv.reader(io.StringIO(result.stdout or "")):
         if len(row) > 1 and row[1].strip() == str(pid):

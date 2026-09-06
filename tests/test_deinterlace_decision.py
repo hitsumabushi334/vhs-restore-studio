@@ -65,6 +65,43 @@ def test_clean_5994p_progressive_source_disables_deinterlace():
     assert decision.filter_expression is None
     assert decision.qtgmc_script is None
 
+def test_mixed_5994p_source_stays_progressive_in_auto_mode():
+    analysis = _source(
+        classification="Mixed",
+        frame_rate=60000 / 1001,
+    )
+
+    decision = decide_deinterlace(
+        analysis,
+        RestoreSettings(),
+        qtgmc_available=True,
+    )
+
+    assert decision.enabled is False
+    assert decision.method == "off"
+    assert decision.double_rate is False
+    assert decision.output_frame_rate == pytest.approx(60000 / 1001)
+    assert "already-progressive" in decision.reason
+    assert "59.94p" in decision.reason
+
+
+def test_forced_tff_still_deinterlaces_5994p_source():
+    analysis = _source(
+        classification="Mixed",
+        frame_rate=60000 / 1001,
+    )
+
+    decision = decide_deinterlace(
+        analysis,
+        RestoreSettings(deinterlace="tff"),
+        qtgmc_available=True,
+    )
+
+    assert decision.enabled is True
+    assert decision.method == "qtgmc"
+    assert decision.field_order == "TFF"
+    assert decision.double_rate is True
+    assert decision.output_frame_rate == pytest.approx(120000 / 1001)
 
 def test_interlaced_source_uses_bwdif_double_rate_when_qtgmc_is_unavailable():
     analysis = _source(

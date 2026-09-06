@@ -17,15 +17,20 @@ from vhs_restore.utils.system import find_tool, free_disk_space
 
 def _pid_is_running(pid: int) -> bool:
     if os.name == "nt":
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=False,
-        )
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+            )
+        except OSError:
+            return False
+        if result.returncode != 0:
+            return False
         for row in csv.reader(io.StringIO(result.stdout)):
             if len(row) > 1 and row[1].strip() == str(pid):
                 return True
@@ -36,6 +41,24 @@ def _pid_is_running(pid: int) -> bool:
     except (ProcessLookupError, PermissionError):
         return False
     return True
+
+
+def _windows_sleep_process_stays_alive(tmp_path: Path) -> bool:
+    """Return whether a short-lived sleep child survives a cheap preflight."""
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", "import time; time.sleep(2)"],
+        cwd=tmp_path,
+    )
+    deadline = time.monotonic() + 1.0
+    try:
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return process.poll() is None
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
+
 
 
 def _wait_until(predicate, timeout: float = 5.0) -> bool:
@@ -120,6 +143,67 @@ def test_run_command_callback_failure_kills_and_waits_for_child(tmp_path: Path):
             kill_process_tree(child_pid)
 
 
+def test_windows_pid_exists_treats_tasklist_failure_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="ERROR: Access is denied.",
+        )
+
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    assert process_utils._windows_pid_exists(2468) is False
+
+
+def test_windows_pid_exists_keeps_a_matching_csv_row_live(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='"python.exe","2468","Console","1","1,024 K"\r\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    assert process_utils._windows_pid_exists(2468) is True
+
+
+def test_pid_is_running_treats_tasklist_failure_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="ERROR: Access is denied.",
+        )
+
+    monkeypatch.setattr(process_utils.os, "name", "nt")
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    assert _pid_is_running(2468) is False
+
+
+def test_pid_is_running_treats_tasklist_unstartable_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(process_utils.os, "name", "nt")
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    assert _pid_is_running(2468) is False
+
+
 def test_setup_job_logger_writes_utf8_log_once(tmp_path: Path):
     job_dir = tmp_path / "日本語 job [01]"
 
@@ -178,6 +262,9 @@ def test_kill_process_tree_surfaces_taskkill_failure_for_a_live_process(
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows taskkill process trees")
 def test_kill_process_tree_terminates_windows_parent_and_child(tmp_path: Path):
+    if not _windows_sleep_process_stays_alive(tmp_path):
+        pytest.skip("sandbox does not keep sleep child processes alive")
+
     child_script = "import time; time.sleep(60)"
     parent_script = (
         "import subprocess, sys, time; "

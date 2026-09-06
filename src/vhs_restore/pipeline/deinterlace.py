@@ -132,9 +132,12 @@ def _is_clean_progressive_5994p(
     frame_rate: float | None,
 ) -> bool:
     return (
-        classification == "Progressive"
+        classification in {"Progressive", *_INTERLACED_CLASSIFICATIONS}
         and frame_rate is not None
-        and math.isclose(frame_rate, 60000 / 1001, rel_tol=0.0, abs_tol=0.02)
+        and (
+            math.isclose(frame_rate, 60000 / 1001, rel_tol=0.0, abs_tol=0.02)
+            or frame_rate >= 50.0
+        )
     )
 
 
@@ -191,9 +194,9 @@ def decide_deinterlace(
 ) -> DeinterlaceDecision:
     """Resolve whether and how a source should be deinterlaced.
 
-    ``auto`` follows idet/source analysis.  A clean progressive 59.94p source
-    is explicitly kept progressive, preventing a second double-rate pass.
-    ``tff`` and ``bff`` remain available as deliberate manual overrides.
+    ``auto`` follows idet/source analysis.  Clean progressive or high-frame-rate
+    sources are explicitly kept progressive, preventing a second double-rate
+    pass.  ``tff`` and ``bff`` remain available as deliberate manual overrides.
     """
 
     settings = settings or RestoreSettings()
@@ -213,7 +216,15 @@ def decide_deinterlace(
     elif _is_clean_progressive_5994p(classification, frame_rate):
         enabled = False
         field_order = None
-        reason = "Clean progressive 59.94p source; deinterlace disabled."
+        if frame_rate is not None and math.isclose(
+            frame_rate, 60000 / 1001, rel_tol=0.0, abs_tol=0.02
+        ):
+            reason = "Source is already-progressive 59.94p; deinterlace disabled."
+        else:
+            reason = (
+                "Source is already-progressive high-frame-rate (>=50 fps); "
+                "deinterlace disabled."
+            )
     elif classification in _INTERLACED_CLASSIFICATIONS:
         enabled = True
         field_order = _resolve_interlaced_field_order(classification, analysis)
