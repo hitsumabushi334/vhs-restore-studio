@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,6 +100,20 @@ class Video2XBackend:
         resolved = resolve_realesrgan_model(model, scale)
         if resolved:
             argv.extend(("--realesrgan-model", resolved))
+        argv.extend(
+            (
+                "-c",
+                "libx264",
+                "--pix-fmt",
+                "yuv420p",
+                "--thread-count",
+                str(os.cpu_count() or 0),
+                "-e",
+                "preset=ultrafast",
+                "-e",
+                "crf=18",
+            )
+        )
 
         try:
             result = run_command(argv)

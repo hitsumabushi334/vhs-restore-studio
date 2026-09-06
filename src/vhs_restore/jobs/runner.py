@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from vhs_restore.analysis.source_info import SourceInfo
-from vhs_restore.pipeline.encode import build_encode_args
+from vhs_restore.pipeline.encode import align_encode_container_with_output, build_encode_args
 from vhs_restore.pipeline.pipeline import PipelinePlan, build_pipeline
 from vhs_restore.settings import RestoreSettings
 from vhs_restore.upscale.base import UpscaleBackend, select_upscale_backend
@@ -1146,10 +1146,13 @@ class RestoreJobRunner:
                 if cached_restore is not None and _same_path(cached_restore, output_path):
                     manifest.mark_stage("restore", status="completed", artifact=output_path)
                 else:
-                    encode_args = build_encode_args(
-                        settings.output_profile,
-                        analysis,
-                        settings,
+                    encode_args = align_encode_container_with_output(
+                        build_encode_args(
+                            settings.output_profile,
+                            analysis,
+                            settings,
+                        ),
+                        output_path,
                     )
                     self._run_ffmpeg_stage(
                         stage="restore",
@@ -1202,10 +1205,13 @@ class RestoreJobRunner:
 
                 cached_final = self._cache_artifact(cache, manifest, "final")
                 if cached_final is None or not _same_path(cached_final, output_path):
-                    encode_args = build_encode_args(
-                        settings.output_profile,
-                        analysis,
-                        settings,
+                    encode_args = align_encode_container_with_output(
+                        build_encode_args(
+                            settings.output_profile,
+                            analysis,
+                            settings,
+                        ),
+                        output_path,
                     )
                     self._run_ffmpeg_stage(
                         stage="encode",

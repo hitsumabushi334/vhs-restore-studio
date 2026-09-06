@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
-    QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -72,10 +73,22 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _default_output_path(source: Path | None = None) -> Path:
-    name = "restored.mkv"
+def _playable_output_extension(profile: str | None) -> str:
+    """Return a Windows-friendly default suffix for the encode profile."""
+
+    if profile in {"compatibility", "archive_practical"}:
+        return ".mp4"
+    return ".mkv"
+
+
+def _default_output_path(
+    source: Path | None = None,
+    profile: str | None = None,
+) -> Path:
+    extension = _playable_output_extension(profile)
+    name = f"restored{extension}"
     if source is not None and source.stem:
-        name = f"{source.stem}_restored.mkv"
+        name = f"{source.stem}_restored{extension}"
     return _project_root() / "output" / name
 
 
@@ -102,7 +115,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("VHS Restore Studio")
-        self.resize(960, 760)
         self.setAcceptDrops(False)
 
         self.controller = controller or RestoreController(parent=self)
@@ -112,6 +124,7 @@ class MainWindow(QMainWindow):
         self._using_default_output = True
 
         self._build_ui()
+        self._size_to_available_screen()
         self._connect_signals()
         self._apply_preset("natural")
         self._set_running(False)
@@ -135,7 +148,7 @@ class MainWindow(QMainWindow):
         self.analysis_panel = QPlainTextEdit(self)
         self.analysis_panel.setReadOnly(True)
         self.analysis_panel.setPlaceholderText("Source analysis appears here.")
-        self.analysis_panel.setMinimumHeight(110)
+        self.analysis_panel.setMinimumHeight(64)
         analysis_group = QGroupBox("Source analysis", self)
         analysis_layout = QVBoxLayout(analysis_group)
         analysis_layout.addWidget(self.analysis_panel)
@@ -214,24 +227,59 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.log_area = QPlainTextEdit(self)
         self.log_area.setReadOnly(True)
-        self.log_area.setMinimumHeight(120)
+        self.log_area.setMinimumHeight(80)
 
         progress_group = QGroupBox("Progress and log", self)
         progress_layout = QVBoxLayout(progress_group)
         progress_layout.addWidget(self.stage_label)
         progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(self.log_area)
+        progress_layout.addWidget(self.log_area, 1)
+
+        settings_widget = QWidget(self)
+        settings_layout = QVBoxLayout(settings_widget)
+        settings_layout.addWidget(input_group)
+        settings_layout.addWidget(analysis_group)
+        settings_layout.addWidget(controls_group)
+        settings_layout.addWidget(preview_group)
+        settings_layout.addWidget(output_group)
+        settings_layout.addLayout(action_row)
+        settings_layout.addStretch(1)
+
+        settings_scroll = QScrollArea(self)
+        settings_scroll.setObjectName("settings_scroll")
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setWidget(settings_widget)
+
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.setObjectName("main_splitter")
+        splitter.addWidget(settings_scroll)
+        splitter.addWidget(progress_group)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         root = QWidget(self)
         root_layout = QVBoxLayout(root)
-        root_layout.addWidget(input_group)
-        root_layout.addWidget(analysis_group)
-        root_layout.addWidget(controls_group)
-        root_layout.addWidget(preview_group)
-        root_layout.addWidget(output_group)
-        root_layout.addLayout(action_row)
-        root_layout.addWidget(progress_group, 1)
+        root_layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
+
+    def _size_to_available_screen(self) -> None:
+        screen = self.screen()
+        if screen is None:
+            self.resize(960, 640)
+            return
+
+        available = screen.availableGeometry()
+        margin = 24
+        width = min(880, max(720, available.width() - 2 * margin))
+        height = min(620, max(520, available.height() - 2 * margin))
+        width = min(width, max(1, available.width() - 2 * margin))
+        height = min(height, max(1, available.height() - 2 * margin))
+        self.setGeometry(
+            available.x() + margin,
+            available.y() + margin,
+            width,
+            height,
+        )
 
     @staticmethod
     def _make_strength_slider() -> tuple[QSlider, QLabel]:
@@ -261,6 +309,7 @@ class MainWindow(QMainWindow):
         self.advanced_button.clicked.connect(self._open_advanced_settings)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.output_path_edit.textEdited.connect(self._output_path_edited)
+        self.output_profile_combo.currentIndexChanged.connect(self._refresh_default_output_path)
         self.diagnostics_button.clicked.connect(self._show_diagnostics)
 
         self.controller.analysis_started.connect(self._analysis_started)
@@ -295,6 +344,7 @@ class MainWindow(QMainWindow):
         self._set_combo_value(self.output_profile_combo, settings.output_profile)
         self._update_ai_enablement()
         self._preview_position_changed(self.preview_position_slider.value())
+        self._refresh_default_output_path()
 
     def _preset_index_changed(self, index: int) -> None:
         key = self.preset_combo.itemData(index)
@@ -332,7 +382,9 @@ class MainWindow(QMainWindow):
         self._analysis = None
         self.analysis_panel.setPlainText("Analyzing source…")
         if self._using_default_output:
-            self.output_path_edit.setText(str(_default_output_path(path)))
+            self.output_path_edit.setText(
+                str(_default_output_path(path, self._settings_from_controls().output_profile))
+            )
         self._analyze_path(path)
 
     def _analyze_from_field(self) -> None:
@@ -409,11 +461,22 @@ class MainWindow(QMainWindow):
             f"{value}% ({_format_seconds(start)} / {_format_seconds(duration)})"
         )
 
+    def _refresh_default_output_path(self, *_args) -> None:
+        if not self._using_default_output:
+            return
+        source_text = self.input_path_edit.text().strip()
+        source = Path(source_text).expanduser() if source_text else None
+        profile = str(self.output_profile_combo.currentData() or "")
+        self.output_path_edit.setText(str(_default_output_path(source, profile)))
+
     def _resolve_output_path(self, source: Path) -> Path:
         value = self.output_path_edit.text().strip()
-        path = Path(value).expanduser() if value else _default_output_path(source)
+        profile = self._settings_from_controls().output_profile
+        path = Path(value).expanduser() if value else _default_output_path(source, profile)
         if path.exists() and path.is_dir():
-            path = path / f"{source.stem}_restored.mkv"
+            path = path / f"{source.stem}_restored{_playable_output_extension(profile)}"
+        if _playable_output_extension(profile) == ".mp4" and path.suffix.casefold() != ".mp4":
+            path = path.with_suffix(".mp4")
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -523,10 +586,15 @@ class MainWindow(QMainWindow):
         self._append_log("Advanced settings updated.")
 
     def _browse_output(self) -> None:
+        profile = self._settings_from_controls().output_profile
+        default_path = str(
+            self.output_path_edit.text().strip()
+            or _default_output_path(profile=profile)
+        )
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Choose output file",
-            self.output_path_edit.text() or str(_default_output_path()),
+            default_path,
             "Video files (*.mkv *.mp4 *.mov);;All files (*.*)",
         )
         if path:

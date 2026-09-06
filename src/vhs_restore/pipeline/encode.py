@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from vhs_restore.analysis.interlace import normalize_field_order
 from vhs_restore.analysis.source_info import SourceInfo
@@ -256,7 +257,7 @@ def build_encode_args(
     elif selected == "archive_practical":
         args = [
             "-f",
-            "matroska",
+            "mp4",
             "-c:v",
             "libx264",
             "-preset",
@@ -269,6 +270,8 @@ def build_encode_args(
             "aac",
             "-b:a",
             "192k",
+            "-movflags",
+            "+faststart",
         ]
     else:
         args = [
@@ -280,8 +283,6 @@ def build_encode_args(
             "medium",
             "-profile:v",
             "high",
-            "-level",
-            "4.1",
             "-crf",
             "20",
             "-pix_fmt",
@@ -300,4 +301,39 @@ def build_encode_args(
     return args
 
 
-__all__ = ["build_encode_args"]
+def align_encode_container_with_output(args: list[str], output: str | Path) -> list[str]:
+    """Keep libx264 muxer flags consistent with the output filename."""
+
+    aligned = list(args)
+    try:
+        codec = aligned[aligned.index("-c:v") + 1]
+    except (ValueError, IndexError):
+        return aligned
+    if codec not in {"libx264", "libx265"}:
+        return aligned
+
+    suffix = Path(output).suffix.casefold()
+    if suffix == ".mp4":
+        container = "mp4"
+    elif suffix in {".mkv", ".mk3d"}:
+        container = "matroska"
+    else:
+        return aligned
+
+    if "-f" in aligned:
+        aligned[aligned.index("-f") + 1] = container
+    else:
+        aligned.extend(["-f", container])
+
+    if container == "mp4":
+        if "-movflags" not in aligned:
+            aligned.extend(["-movflags", "+faststart"])
+        if "-pix_fmt" not in aligned:
+            aligned.extend(["-pix_fmt", "yuv420p"])
+    elif "-movflags" in aligned:
+        index = aligned.index("-movflags")
+        del aligned[index : index + 2]
+    return aligned
+
+
+__all__ = ["align_encode_container_with_output", "build_encode_args"]

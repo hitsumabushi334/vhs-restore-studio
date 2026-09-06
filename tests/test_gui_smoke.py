@@ -14,8 +14,7 @@ def test_main_window_constructs_offscreen():
         module_spec = None
     assert module_spec is not None
 
-    from PySide6.QtWidgets import QApplication
-
+    from PySide6.QtWidgets import QApplication, QSplitter
     from vhs_restore.gui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
@@ -29,10 +28,29 @@ def test_main_window_constructs_offscreen():
     assert window.cancel_button is not None
     assert window.progress_bar is not None
     assert window.log_area is not None
+    splitters = window.findChildren(QSplitter)
+    assert any(splitter.count() == 2 for splitter in splitters)
 
     window.close()
     app.processEvents()
 
+def test_compatibility_default_output_uses_mp4_suffix(tmp_path):
+    from vhs_restore.gui.main_window import MainWindow, _default_output_path
+    from PySide6.QtWidgets import QApplication
+
+    assert _default_output_path(Path("capture.avi"), "compatibility").suffix == ".mp4"
+    assert _default_output_path(Path("capture.avi"), "archive_practical").suffix == ".mp4"
+    assert _default_output_path(Path("capture.avi"), "archive_hq").suffix == ".mkv"
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.output_path_edit.setText(str(tmp_path / "restored.mkv"))
+    window._set_combo_value(window.output_profile_combo, "compatibility")
+
+    assert window._resolve_output_path(Path("capture.avi")).suffix == ".mp4"
+
+    window.close()
+    app.processEvents()
 
 def test_preview_request_uses_slider_position_and_fixed_duration():
     from vhs_restore.analysis.source_info import SourceInfo
@@ -191,3 +209,20 @@ def test_gui_diagnostics_show_realesrgan_image_cli_reason_not_vulkan_failure():
     assert "image CLI only; not used for video upscale" in text
     assert "Vulkan probe failed" not in text
     assert "AI backend unavailable" in text
+
+
+def test_archive_practical_rewrites_mkv_output_to_mp4(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from vhs_restore.gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window._using_default_output = False
+    window.output_path_edit.setText(str(tmp_path / "custom restored.mkv"))
+    window._set_combo_value(window.output_profile_combo, "archive_practical")
+
+    assert window._resolve_output_path(Path("capture.avi")).suffix == ".mp4"
+
+    window.close()
+    app.processEvents()

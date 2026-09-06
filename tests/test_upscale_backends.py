@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -204,6 +205,16 @@ def test_video2x_upscale_uses_argv_and_a_safe_unique_output(
             "2",
             "--realesrgan-model",
             "realesr-animevideov3",
+            "-c",
+            "libx264",
+            "--pix-fmt",
+            "yuv420p",
+            "--thread-count",
+            str(os.cpu_count() or 0),
+            "-e",
+            "preset=ultrafast",
+            "-e",
+            "crf=18",
         ]
     ]
 
@@ -227,7 +238,11 @@ def test_video2x_maps_ncnn_x4plus_to_plus_at_scale_4(
 
     Video2XBackend().upscale(source, tmp_path / "out.mp4", scale=4, model="realesrgan-x4plus")
 
-    assert calls[0][-2:] == ["--realesrgan-model", "realesrgan-plus"]
+    model_flag_index = calls[0].index("--realesrgan-model")
+    assert calls[0][model_flag_index : model_flag_index + 2] == [
+        "--realesrgan-model",
+        "realesrgan-plus",
+    ]
 
 
 def test_video2x_omits_unknown_realesrgan_model_instead_of_passing_it(
