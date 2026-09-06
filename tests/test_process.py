@@ -117,6 +117,26 @@ def test_run_command_decodes_utf8_output_explicitly(tmp_path: Path):
     result = run_command([sys.executable, "-c", script], cwd=tmp_path)
 
     assert result.stdout == "日本語 ✓\n"
+def test_start_command_binary_mode_decodes_output_lines_without_text_mode(
+    tmp_path: Path,
+):
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'frame\\xff\\x00\\n'); "
+        "sys.stdout.flush()"
+    )
+    received: list[str] = []
+
+    result = start_command(
+        [sys.executable, "-u", "-c", script],
+        cwd=tmp_path,
+        text=False,
+        on_output=received.append,
+    ).wait()
+
+    assert received == ["frame�\x00"]
+    assert result.stdout == "frame�\x00\n"
+
 
 
 def test_run_command_callback_failure_kills_and_waits_for_child(tmp_path: Path):

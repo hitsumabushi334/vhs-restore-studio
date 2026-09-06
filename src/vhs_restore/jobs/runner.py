@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +21,7 @@ from vhs_restore.upscale.base import UpscaleBackend, select_upscale_backend
 from vhs_restore.utils.logging import setup_job_logger
 from vhs_restore.utils.paths import safe_output_path
 from vhs_restore.utils.process import ManagedProcess, start_command
-from vhs_restore.utils.system import free_disk_space
+from vhs_restore.utils.system import find_tool, free_disk_space
 
 from .cache import JobCache
 from .manifest import (
@@ -59,6 +61,53 @@ class JobAlreadyRunningError(JobError):
 
 class _JobCancelledSignal(Exception):
     """Internal control flow used after a live process has been terminated."""
+
+
+class _ProcessGroup:
+    """Treat the QTGMC producer and FFmpeg consumer as one cancelable stage."""
+
+    def __init__(self, *processes: Any) -> None:
+        self._processes = tuple(process for process in processes if process is not None)
+        self._process = (
+            getattr(self._processes[0], "_process", None) if self._processes else None
+        )
+
+    @property
+    def returncode(self) -> int | None:
+        returncode: int | None = 0
+        for process in self._processes:
+            returncode = getattr(process, "returncode", None)
+            if returncode is None:
+                return None
+        return returncode
+
+    def kill(self) -> None:
+        first_error: BaseException | None = None
+        for process in self._processes:
+            try:
+                process.kill()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                raw_process = getattr(process, "_process", None)
+                force_kill = getattr(raw_process, "kill", None)
+                if callable(force_kill):
+                    try:
+                        force_kill()
+                    except BaseException:
+                        pass
+        if first_error is not None:
+            raise first_error
+
+    def wait(self, timeout: float | None = None) -> Any:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        result: Any = None
+        for index, process in enumerate(self._processes):
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            current = process.wait() if remaining is None else process.wait(timeout=remaining)
+            if index == 0:
+                result = current
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +166,7 @@ def build_ffmpeg_argv(
     output: str | os.PathLike[str] | Path,
     *,
     input_path: str | os.PathLike[str] | Path | None = None,
+    audio_source: str | os.PathLike[str] | Path | None = None,
     encode_args: Iterable[str] = (),
     ffmpeg_executable: str | os.PathLike[str] = "ffmpeg",
     include_pipeline_filters: bool = True,
@@ -128,21 +178,44 @@ def build_ffmpeg_argv(
         raise TypeError("plan must be a PipelinePlan instance")
     input_value = Path(input_path) if input_path is not None else plan.source
     output_value = Path(output)
+    audio_value = Path(audio_source) if audio_source is not None else None
     args = [str(item) for item in encode_args]
-    if include_pipeline_filters:
-        _merge_pipeline_filter(args, plan.filter_graph)
+    start = _as_number(plan.start)
+    duration = _as_number(plan.duration)
+    pipe_input = str(input_value) == "pipe:0"
+    filter_graph = plan.filter_graph if include_pipeline_filters else ""
+    if pipe_input and (start is not None or duration is not None):
+        trim_options: list[str] = []
+        if start is not None and float(start) != 0:
+            trim_options.append(f"start={start}")
+        if duration is not None:
+            trim_options.append(f"duration={duration}")
+        if trim_options:
+            trim_graph = f"trim={':'.join(trim_options)},setpts=PTS-STARTPTS"
+            filter_graph = (
+                f"{trim_graph},{filter_graph}" if filter_graph else trim_graph
+            )
+    if filter_graph:
+        _merge_pipeline_filter(args, filter_graph)
 
     argv = [str(ffmpeg_executable), "-hide_banner", "-nostdin", "-y"]
     if progress:
         argv.extend(("-progress", "pipe:1", "-nostats"))
-    start = _as_number(plan.start)
-    duration = _as_number(plan.duration)
-    if start is not None:
-        argv.extend(("-ss", start))
-    if duration is not None:
-        argv.extend(("-t", duration))
+    if not pipe_input:
+        if start is not None:
+            argv.extend(("-ss", start))
+        if duration is not None:
+            argv.extend(("-t", duration))
     argv.extend(("-i", str(input_value)))
+    if audio_value is not None:
+        if start is not None:
+            argv.extend(("-ss", start))
+        if duration is not None:
+            argv.extend(("-t", duration))
+        argv.extend(("-i", str(audio_value)))
     argv.extend(args)
+    if audio_value is not None:
+        argv.extend(("-map", "0:v:0", "-map", "1:a?"))
     argv.append(str(output_value))
     return argv
 
@@ -255,6 +328,8 @@ class RestoreJobRunner:
         self._lock = threading.RLock()
         self._running = False
         self._cancel_event = threading.Event()
+        self._cancel_finished = threading.Event()
+        self._cancel_finished.set()
         self._external_cancel: threading.Event | CancellationToken | None = None
         self._current_process: ManagedProcess | Any | None = None
         self._current_stage: str | None = None
@@ -283,11 +358,12 @@ class RestoreJobRunner:
         """Request cancellation and terminate the active process tree."""
 
         with self._lock:
+            self._cancel_finished.clear()
             self._cancel_event.set()
             process = self._current_process
-        if process is None:
-            return
         try:
+            if process is None:
+                return
             returncode = getattr(process, "returncode", None)
             if returncode is None:
                 process.kill()
@@ -305,6 +381,8 @@ class RestoreJobRunner:
                     force_kill()
                 except BaseException as fallback_error:
                     self._cancel_error = fallback_error
+        finally:
+            self._cancel_finished.set()
 
     def _is_cancelled(self) -> bool:
         if self._cancel_event.is_set():
@@ -316,8 +394,20 @@ class RestoreJobRunner:
             return external.is_cancelled()
         return external.is_set()
 
+    def _wait_for_cancel_completion(self) -> None:
+        if not self._cancel_finished.wait(timeout=30.0):
+            raise JobError("restore job cancellation did not finish")
+
+    def _raise_if_cancel_failed(self) -> None:
+        self._wait_for_cancel_completion()
+        cancel_error = self._cancel_error
+        if cancel_error is not None:
+            raise JobError("restore job cancellation failed") from cancel_error
+
     def _check_cancel(self) -> None:
         if self._is_cancelled():
+            self._wait_for_cancel_completion()
+            self._raise_if_cancel_failed()
             raise _JobCancelledSignal()
 
     def _set_active(self, stage: str, process: Any) -> None:
@@ -330,6 +420,13 @@ class RestoreJobRunner:
             if self._current_process is process:
                 self._current_process = None
                 self._current_stage = None
+    def _kill_for_cancel(self, process: Any) -> None:
+        try:
+            process.kill()
+        except BaseException as exc:
+            with self._lock:
+                if self._cancel_error is None:
+                    self._cancel_error = exc
 
     def _emit(
         self,
@@ -456,6 +553,47 @@ class RestoreJobRunner:
             return None
         return max(0.0, min(1.0, microseconds / 1_000_000.0 / duration))
 
+    def _run_qtgmc_stage(self, *, stage: str, plan: PipelinePlan) -> Any:
+        """Start the planned QTGMC graph and return its stdout producer."""
+
+        script = plan.qtgmc_script
+        work_dir = self._work_dir
+        if not script or work_dir is None:
+            raise JobError("QTGMC stage has no job work directory or script")
+
+        qtgmc_dir = work_dir / "qtgmc"
+        qtgmc_dir.mkdir(parents=True, exist_ok=True)
+        script_path = (qtgmc_dir / f"{stage}.qtgmc.vpy").resolve(strict=False)
+        if _same_path(script_path, plan.source):
+            raise JobError("refusing to overwrite QTGMC source script")
+        script_path.write_text(script, encoding="utf-8")
+
+        resolved = find_tool("vspipe")
+        executable = resolved if resolved is not None else "vspipe"
+        argv = [str(executable), "--y4m", str(script_path), "-"]
+        if self._logger is not None:
+            self._logger.info("stage=%s argv=%r", stage, argv)
+
+        try:
+            process = self._start_command(
+                argv,
+                cwd=work_dir,
+                on_output=None,
+                text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                capture_output=False,
+            )
+        except BaseException as exc:
+            if self._is_cancelled():
+                self._wait_for_cancel_completion()
+                self._raise_if_cancel_failed()
+                raise _JobCancelledSignal() from exc
+            raise JobError(f"{stage} QTGMC stage failed to start vspipe: {exc}") from exc
+
+        self._set_active(stage, process)
+        return process
+
     def _run_ffmpeg_stage(
         self,
         *,
@@ -473,10 +611,30 @@ class RestoreJobRunner:
         partial = _partial_path(artifact)
         if partial.exists():
             partial.unlink()
+        qtgmc_process: Any | None = None
+        ffmpeg_input: Path | str = input_path
+        audio_source: Path | None = None
+        if (
+            plan.deinterlace.method.casefold() == "qtgmc"
+            and plan.qtgmc_script
+            and _same_path(input_path, plan.source)
+        ):
+            qtgmc_process = self._run_qtgmc_stage(stage=stage, plan=plan)
+            try:
+                self._check_cancel()
+            except BaseException as exc:
+                self._kill_for_cancel(qtgmc_process)
+                self._clear_active(qtgmc_process)
+                self._ensure_partial(partial)
+                self._raise_if_cancel_failed()
+                raise _JobCancelledSignal() from exc
+            ffmpeg_input = "pipe:0"
+            audio_source = plan.source
         argv = build_ffmpeg_argv(
             plan,
             partial,
-            input_path=input_path,
+            input_path=ffmpeg_input,
+            audio_source=audio_source,
             encode_args=encode_args,
             ffmpeg_executable=self.ffmpeg_executable,
         )
@@ -491,31 +649,70 @@ class RestoreJobRunner:
                 self._emit(stage, progress, line)
 
         self._emit(stage, 0.0, f"{stage} started")
+        ffmpeg_stdin = getattr(qtgmc_process, "stdout", None)
         try:
-            process = self._start_command(
-                argv,
-                cwd=self._work_dir,
-                on_output=on_output,
-            )
+            if ffmpeg_stdin is None:
+                process = self._start_command(
+                    argv,
+                    cwd=self._work_dir,
+                    on_output=on_output,
+                )
+            else:
+                process = self._start_command(
+                    argv,
+                    cwd=self._work_dir,
+                    on_output=on_output,
+                    stdin=ffmpeg_stdin,
+                    text=False,
+                )
         except BaseException as exc:
+            if qtgmc_process is not None:
+                self._kill_for_cancel(qtgmc_process)
+                self._clear_active(qtgmc_process)
             if self._is_cancelled():
                 self._ensure_partial(partial)
+                self._raise_if_cancel_failed()
                 raise _JobCancelledSignal() from exc
             raise
-        self._set_active(stage, process)
+        if ffmpeg_stdin is not None:
+            close_stdin = getattr(ffmpeg_stdin, "close", None)
+            if callable(close_stdin):
+                close_stdin()
+        process_group = _ProcessGroup(process, qtgmc_process)
+        with self._lock:
+            self._current_stage = stage
+            self._current_process = process_group
+            cancelled_after_spawn = self._is_cancelled()
+        if cancelled_after_spawn:
+            self._kill_for_cancel(process_group)
+            self._ensure_partial(partial)
+            self._raise_if_cancel_failed()
+            raise _JobCancelledSignal()
         try:
-            result = process.wait()
+            result = process_group.wait()
         except BaseException as exc:
             if self._is_cancelled():
                 self._ensure_partial(partial)
+                self._raise_if_cancel_failed()
                 raise _JobCancelledSignal() from exc
             raise
         finally:
-            self._clear_active(process)
+            self._clear_active(process_group)
 
         if self._is_cancelled():
             self._ensure_partial(partial)
+            self._raise_if_cancel_failed()
             raise _JobCancelledSignal()
+        qtgmc_returncode = (
+            getattr(qtgmc_process, "returncode", 0) if qtgmc_process is not None else 0
+        )
+        if qtgmc_returncode != 0:
+            detail = str(getattr(qtgmc_process, "stdout", "") or "").strip()
+            suffix = f": {detail}" if detail else ""
+            raise JobError(
+                f"{stage} QTGMC stage failed with vspipe exit code "
+                f"{qtgmc_returncode}{suffix}"
+            )
         returncode = getattr(result, "returncode", 0)
         if returncode != 0:
             self._ensure_partial(partial)
@@ -563,12 +760,14 @@ class RestoreJobRunner:
             except BaseException as exc:
                 if self._is_cancelled():
                     self._ensure_partial(backend_output)
+                    self._raise_if_cancel_failed()
                     raise _JobCancelledSignal() from exc
                 raise
             finally:
                 self._clear_active(process)
             if self._is_cancelled():
                 self._ensure_partial(backend_output)
+                self._raise_if_cancel_failed()
                 raise _JobCancelledSignal()
             if isinstance(result, Path):
                 result_path = result
@@ -588,6 +787,7 @@ class RestoreJobRunner:
                 result_path = Path(result)
             if self._is_cancelled():
                 self._ensure_partial(backend_output)
+                self._raise_if_cancel_failed()
                 raise _JobCancelledSignal()
 
         produced = result_path or backend_output
@@ -680,6 +880,7 @@ class RestoreJobRunner:
                 raise JobAlreadyRunningError("this restore job runner is already running")
             self._running = True
             self._cancel_event.clear()
+            self._cancel_finished.set()
             self._external_cancel = cancel_event
             self._cancel_error = None
 
