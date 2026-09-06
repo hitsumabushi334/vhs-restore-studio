@@ -180,6 +180,7 @@ def generate_qtgmc_script(
     qtgmc_preset = _qtgmc_preset_name(preset)
     return "\n".join(
         (
+            "import vapoursynth as vs",
             "import havsfunc",
             "",
             "core = vs.core",

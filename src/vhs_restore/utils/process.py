@@ -125,9 +125,11 @@ class ManagedProcess:
 
     def __init__(
         self,
-        process: subprocess.Popen[str],
+        process: subprocess.Popen[object],
         argv: list[str],
         on_output: Callable[[str], object] | None,
+        *,
+        capture_output: bool = True,
     ) -> None:
         self._process = process
         self._argv = argv
@@ -135,18 +137,25 @@ class ManagedProcess:
         self._output: list[str] = []
         self._callback_error: BaseException | None = None
         self._termination_error: BaseException | None = None
-        self._reader = threading.Thread(
-            target=self._read_output,
-            name=f"vhs-restore-process-{process.pid}",
-            daemon=True,
-        )
-        self._reader.start()
+        self._reader: threading.Thread | None = None
+        if capture_output:
+            self._reader = threading.Thread(
+                target=self._read_output,
+                name=f"vhs-restore-process-{process.pid}",
+                daemon=True,
+            )
+            self._reader.start()
 
     @property
     def pid(self) -> int:
         """Return the operating-system PID of the spawned process."""
 
         return self._process.pid
+    @property
+    def stdout(self):
+        """Return the child stdout stream for process pipelines."""
+
+        return self._process.stdout
 
     @property
     def returncode(self) -> int | None:
@@ -162,10 +171,14 @@ class ManagedProcess:
         callback_error: BaseException | None = None
         try:
             for raw_line in stream:
-                self._output.append(raw_line)
+                if isinstance(raw_line, bytes):
+                    line = raw_line.decode(_OUTPUT_ENCODING, errors="replace")
+                else:
+                    line = raw_line
+                self._output.append(line)
                 if self._on_output is not None:
                     try:
-                        self._on_output(raw_line.rstrip("\r\n"))
+                        self._on_output(line.rstrip("\r\n"))
                     except BaseException as exc:
                         callback_error = exc
                         break
@@ -201,10 +214,11 @@ class ManagedProcess:
         deadline = None if timeout is None else time.monotonic() + timeout
         self._process.wait(timeout=timeout)
 
-        remaining = None if deadline is None else max(0, deadline - time.monotonic())
-        self._reader.join(timeout=remaining)
-        if self._reader.is_alive():
-            raise subprocess.TimeoutExpired(self._argv, timeout)
+        if self._reader is not None:
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            self._reader.join(timeout=remaining)
+            if self._reader.is_alive():
+                raise subprocess.TimeoutExpired(self._argv, timeout)
 
         if self._termination_error is not None:
             raise self._termination_error
@@ -224,6 +238,11 @@ def start_command(
     cwd: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
     on_output: Callable[[str], object] | None = None,
+    stdin: object | None = None,
+    stdout: object = subprocess.PIPE,
+    stderr: object = subprocess.STDOUT,
+    capture_output: bool = True,
+    text: bool = True,
 ) -> ManagedProcess:
     """Start an argv-based command and return it without waiting."""
 
@@ -231,19 +250,25 @@ def start_command(
         raise ValueError("argv must contain an executable")
 
     command_argv = list(argv)
-    process = subprocess.Popen(
-        command_argv,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding=_OUTPUT_ENCODING,
-        errors="replace",
-        bufsize=1,
-        shell=False,
-    )
-    return ManagedProcess(process, command_argv, on_output)
+    popen_kwargs: dict[str, object] = {
+        "cwd": cwd,
+        "env": env,
+        "stdin": stdin,
+        "stdout": stdout,
+        "stderr": stderr,
+        "shell": False,
+    }
+    if text:
+        popen_kwargs.update(
+            text=True,
+            encoding=_OUTPUT_ENCODING,
+            errors="replace",
+            bufsize=1,
+        )
+    else:
+        popen_kwargs.update(text=False, bufsize=0)
+    process = subprocess.Popen(command_argv, **popen_kwargs)
+    return ManagedProcess(process, command_argv, on_output, capture_output=capture_output)
 
 
 def run_command(

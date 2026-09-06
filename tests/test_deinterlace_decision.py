@@ -40,6 +40,8 @@ def test_2997i_field_order_uses_qtgmc_double_rate_when_available(field_order: st
     assert decision.output_frame_rate == pytest.approx(60000 / 1001)
     assert decision.filter_expression is None
     assert decision.qtgmc_script is not None
+    script_lines = [line for line in decision.qtgmc_script.splitlines() if line.strip()]
+    assert script_lines[:2] == ["import vapoursynth as vs", "import havsfunc"]
     assert "havsfunc.QTGMC" in decision.qtgmc_script
     assert "FPSDivisor=1" in decision.qtgmc_script
     assert f"TFF={field_order == 'TFF'}" in decision.qtgmc_script
