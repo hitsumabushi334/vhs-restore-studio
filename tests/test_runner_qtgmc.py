@@ -1,5 +1,9 @@
+import io
 import sys
+from dataclasses import replace
 from pathlib import Path
+from subprocess import CompletedProcess
+
 
 import pytest
 
@@ -39,7 +43,210 @@ def _qtgmc_plan(source: Path, analysis: SourceInfo) -> PipelinePlan:
     )
 
 
-def test_restore_runs_vspipe_before_ffmpeg_and_keeps_trim_on_ffmpeg(
+def test_qtgmc_timed_range_requires_known_output_frame_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    output = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    base_plan = _qtgmc_plan(source, analysis)
+    plan = replace(
+        base_plan,
+        deinterlace=replace(base_plan.deinterlace, output_frame_rate=None),
+        analysis=None,
+    )
+
+    monkeypatch.setattr(runner_module, "build_pipeline", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(runner_module, "build_encode_args", lambda *args, **kwargs: [])
+
+    with pytest.raises(
+        JobError,
+        match="cannot apply timed QTGMC range without known output frame rate",
+    ):
+        RestoreJobRunner(
+            job_dir=tmp_path / "job",
+            free_space_checker=lambda _: 10**12,
+        ).run(source, analysis, RestoreSettings(), output)
+
+    assert not output.exists()
+
+
+class _FakeQTGMCProcess:
+    def __init__(self, returncode: int, stderr: bytes = b""):
+        self.returncode = returncode
+        self.stderr = io.BytesIO(stderr)
+        self.stdout = io.BytesIO(b"vspipe output")
+        self._qtgmc_stderr: list[bytes] = []
+        self._qtgmc_stderr_thread = None
+        if stderr:
+            self._qtgmc_stderr.append(stderr)
+
+    def wait(self, timeout: float | None = None) -> CompletedProcess:
+        return CompletedProcess(args=["fake"], returncode=self.returncode, stdout="")
+
+    def kill(self) -> None:
+        return None
+
+
+def _run_qtgmc_with_fake_vspipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    vspipe_returncode: int,
+    vspipe_stderr: bytes,
+) -> Path:
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    output = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+    processes: list[_FakeQTGMCProcess] = []
+
+    def fake_start(argv: list[str], **kwargs):
+        if "--y4m" in argv:
+            process = _FakeQTGMCProcess(vspipe_returncode, vspipe_stderr)
+        else:
+            Path(argv[-1]).write_bytes(b"encoded")
+            process = _FakeQTGMCProcess(0)
+            process.stdout = None
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(runner_module, "build_pipeline", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(runner_module, "build_encode_args", lambda *args, **kwargs: [])
+
+    runner = RestoreJobRunner(
+        job_dir=tmp_path / "job",
+        start_command_factory=fake_start,
+        free_space_checker=lambda _: 10**12,
+    )
+    try:
+        runner.run(source, analysis, RestoreSettings(), output)
+    finally:
+        assert len(processes) == 2
+    return output
+
+
+def test_qtgmc_unexpected_vspipe_failure_does_not_promote_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    output = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+
+    def fake_start(argv: list[str], **kwargs):
+        if "--y4m" in argv:
+            return _FakeQTGMCProcess(1, b"Script evaluation failed")
+        Path(argv[-1]).write_bytes(b"encoded")
+        process = _FakeQTGMCProcess(0)
+        process.stdout = None
+        return process
+
+    monkeypatch.setattr(runner_module, "build_pipeline", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(runner_module, "build_encode_args", lambda *args, **kwargs: [])
+    runner = RestoreJobRunner(
+        job_dir=tmp_path / "job",
+        start_command_factory=fake_start,
+        free_space_checker=lambda _: 10**12,
+    )
+    with pytest.raises(JobError, match="vspipe exit code 1: Script evaluation failed"):
+        runner.run(source, analysis, RestoreSettings(), output)
+
+    assert not output.exists()
+    assert Path(f"{output}.partial").exists()
+
+
+@pytest.mark.parametrize(
+    ("vspipe_returncode", "vspipe_stderr"),
+    [
+        (141, b""),
+        (1, b"Broken pipe"),
+        (1, b"Error: fwrite() call failed when writing video plane P, errno: 32"),
+        (1, b"Error: fwrite() call failed when writing video plane P, errno: 109"),
+    ],
+)
+def test_qtgmc_expected_vspipe_broken_pipe_still_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vspipe_returncode: int,
+    vspipe_stderr: bytes,
+):
+    output = _run_qtgmc_with_fake_vspipe(
+        tmp_path,
+        monkeypatch,
+        vspipe_returncode=vspipe_returncode,
+        vspipe_stderr=vspipe_stderr,
+    )
+
+    assert output.exists()
+    assert not Path(f"{output}.partial").exists()
+
+
+@pytest.mark.parametrize(
+    "vspipe_stderr",
+    [
+        b"Failed to retrieve frame 0 with error: broken pipe in source",
+        b"Script error: invalid pipe in graph",
+    ],
+)
+def test_qtgmc_plugin_or_script_pipe_errors_are_not_broken_pipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vspipe_stderr: bytes,
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    output = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+
+    def fake_start(argv: list[str], **kwargs):
+        if "--y4m" in argv:
+            return _FakeQTGMCProcess(1, vspipe_stderr)
+        Path(argv[-1]).write_bytes(b"encoded")
+        process = _FakeQTGMCProcess(0)
+        process.stdout = None
+        return process
+
+    monkeypatch.setattr(runner_module, "build_pipeline", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(runner_module, "build_encode_args", lambda *args, **kwargs: [])
+    runner = RestoreJobRunner(
+        job_dir=tmp_path / "job",
+        start_command_factory=fake_start,
+        free_space_checker=lambda _: 10**12,
+    )
+
+    with pytest.raises(JobError, match="vspipe exit code 1"):
+        runner.run(source, analysis, RestoreSettings(), output)
+
+    assert not output.exists()
+    assert Path(f"{output}.partial").exists()
+
+
+def test_vspipe_exit_is_broken_pipe_classifier():
+    classifier = runner_module._vspipe_exit_is_broken_pipe
+
+    assert classifier(141, "")
+    assert classifier(1, "Broken pipe")
+    assert classifier(
+        1,
+        "Error: fwrite() call failed when writing video plane P, errno: 32, frame: 1",
+    )
+    assert classifier(
+        1,
+        "Error: fwrite() call failed when writing video plane P, errno: 109, frame: 1",
+    )
+    assert not classifier(
+        1, "Failed to retrieve frame 0 with error: broken pipe in source"
+    )
+    assert not classifier(1, "Script error: invalid pipe in graph")
+    assert not classifier(1, "Script evaluation failed")
+
+
+def test_restore_runs_vspipe_before_ffmpeg_and_trims_vspipe_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     source = tmp_path / "interlaced source.avi"
@@ -73,8 +280,15 @@ def test_restore_runs_vspipe_before_ffmpeg_and_keeps_trim_on_ffmpeg(
     vspipe_argv, ffmpeg_argv = captured
     assert vspipe_argv[0].casefold().endswith("vspipe")
     qtgmc_dir = tmp_path / "job" / "qtgmc"
+    output_fps = 60000 / 1001
+    expected_start = round(plan.start * output_fps)
+    expected_end = expected_start + max(1, round(plan.duration * output_fps)) - 1
     assert vspipe_argv[1:] == [
         "--y4m",
+        "--start",
+        str(expected_start),
+        "--end",
+        str(expected_end),
         str(qtgmc_dir / "restore.qtgmc.vpy"),
         "-",
     ]
@@ -90,13 +304,11 @@ def test_restore_runs_vspipe_before_ffmpeg_and_keeps_trim_on_ffmpeg(
     second_input = input_indices[1]
     assert ffmpeg_argv[second_input - 4 : second_input] == ["-ss", "3", "-t", "5"]
     filter_index = ffmpeg_argv.index("-vf")
-    assert "trim=start=3:duration=5,setpts=PTS-STARTPTS" in ffmpeg_argv[
-        filter_index + 1
-    ]
+    assert "trim=" not in ffmpeg_argv[filter_index + 1]
+    assert "eq=contrast=1.1" in ffmpeg_argv[filter_index + 1]
     assert ffmpeg_argv[ffmpeg_argv.index("-map") + 1] == "0:v:0"
     second_map = ffmpeg_argv.index("-map", ffmpeg_argv.index("-map") + 1)
     assert ffmpeg_argv[second_map + 1] == "1:a?"
-    assert "eq=contrast=1.1" in ffmpeg_argv[filter_index + 1]
 
 
 

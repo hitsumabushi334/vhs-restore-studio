@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -149,6 +151,37 @@ def _as_number(value: float | None) -> str | None:
     return f"{float(value):g}"
 
 
+def _vspipe_exit_is_broken_pipe(returncode: int | None, stderr_text: str) -> bool:
+    """Return whether a vspipe failure is the expected closed-pipe exit."""
+
+    if returncode in (None, 0):
+        return False
+    normalized = stderr_text.casefold()
+    failure_markers = (
+        "failed to retrieve frame",
+        "script evaluation failed",
+        "script error",
+        "python exception",
+        "error evaluating",
+    )
+    if any(marker in normalized for marker in failure_markers):
+        return False
+    unsigned = returncode & 0xFFFFFFFF
+    if returncode in {141, 109} or unsigned == 0xC000014B:
+        return True
+    pipe_markers = (
+        "broken pipe",
+        "error writing to stdout",
+        "writing to stdout",
+        "fwrite() call failed",
+    )
+    if not any(marker in normalized for marker in pipe_markers):
+        return False
+    if "fwrite() call failed" in normalized:
+        return re.search(r"errno\s*:\s*(32|109)\b", normalized) is not None
+    return True
+
+
 def _merge_pipeline_filter(args: list[str], filter_graph: str) -> list[str]:
     if not filter_graph:
         return args
@@ -184,17 +217,6 @@ def build_ffmpeg_argv(
     duration = _as_number(plan.duration)
     pipe_input = str(input_value) == "pipe:0"
     filter_graph = plan.filter_graph if include_pipeline_filters else ""
-    if pipe_input and (start is not None or duration is not None):
-        trim_options: list[str] = []
-        if start is not None and float(start) != 0:
-            trim_options.append(f"start={start}")
-        if duration is not None:
-            trim_options.append(f"duration={duration}")
-        if trim_options:
-            trim_graph = f"trim={':'.join(trim_options)},setpts=PTS-STARTPTS"
-            filter_graph = (
-                f"{trim_graph},{filter_graph}" if filter_graph else trim_graph
-            )
     if filter_graph:
         _merge_pipeline_filter(args, filter_graph)
 
@@ -570,10 +592,36 @@ class RestoreJobRunner:
 
         resolved = find_tool("vspipe")
         executable = resolved if resolved is not None else "vspipe"
-        argv = [str(executable), "--y4m", str(script_path), "-"]
+        start = _as_number(plan.start)
+        duration = _as_number(plan.duration)
+        output_frame_rate = plan.deinterlace.output_frame_rate
+        if start is not None or duration is not None:
+            try:
+                resolved_frame_rate = float(output_frame_rate)
+            except (TypeError, ValueError):
+                resolved_frame_rate = 0.0
+            if not math.isfinite(resolved_frame_rate) or resolved_frame_rate <= 0:
+                raise JobError(
+                    "cannot apply timed QTGMC range without known output frame rate"
+                )
+            output_frame_rate = resolved_frame_rate
+        start_frame = 0
+        vspipe_range: list[str] = []
+        if start is not None:
+            start_frame = round(float(start) * float(output_frame_rate))
+        if duration is not None:
+            end_frame = start_frame + max(
+                1, round(float(duration) * float(output_frame_rate))
+            ) - 1
+            vspipe_range.extend(("--start", str(start_frame), "--end", str(end_frame)))
+        elif start is not None:
+            vspipe_range.extend(("--start", str(start_frame)))
+        argv = [str(executable), "--y4m", *vspipe_range, str(script_path), "-"]
         if self._logger is not None:
             self._logger.info("stage=%s argv=%r", stage, argv)
 
+        qtgmc_stderr: list[bytes] = []
+        stderr_thread: threading.Thread | None = None
         try:
             process = self._start_command(
                 argv,
@@ -581,9 +629,35 @@ class RestoreJobRunner:
                 on_output=None,
                 text=False,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 capture_output=False,
             )
+            stderr_stream = getattr(process, "stderr", None)
+            if stderr_stream is None:
+                raw_process = getattr(process, "_process", None)
+                stderr_stream = getattr(raw_process, "stderr", None)
+            if stderr_stream is not None:
+
+                def drain_stderr() -> None:
+                    try:
+                        data = stderr_stream.read()
+                    except BaseException:
+                        return
+                    if not data:
+                        return
+                    if isinstance(data, bytes):
+                        qtgmc_stderr.append(data)
+                    else:
+                        qtgmc_stderr.append(str(data).encode("utf-8", errors="replace"))
+
+                stderr_thread = threading.Thread(
+                    target=drain_stderr,
+                    name=f"vhs-restore-{stage}-vspipe-stderr",
+                    daemon=True,
+                )
+                stderr_thread.start()
+            setattr(process, "_qtgmc_stderr", qtgmc_stderr)
+            setattr(process, "_qtgmc_stderr_thread", stderr_thread)
         except BaseException as exc:
             if self._is_cancelled():
                 self._wait_for_cancel_completion()
@@ -703,22 +777,39 @@ class RestoreJobRunner:
             self._ensure_partial(partial)
             self._raise_if_cancel_failed()
             raise _JobCancelledSignal()
+        if qtgmc_process is not None:
+            stderr_thread = getattr(qtgmc_process, "_qtgmc_stderr_thread", None)
+            if stderr_thread is not None:
+                stderr_thread.join()
+        qtgmc_stderr = (
+            getattr(qtgmc_process, "_qtgmc_stderr", []) if qtgmc_process is not None else []
+        )
+        vspipe_detail = b"".join(qtgmc_stderr).decode(
+            "utf-8", errors="replace"
+        ).strip()
+        returncode = getattr(result, "returncode", 0)
+        if returncode != 0:
+            self._ensure_partial(partial)
+            details: list[str] = []
+            ffmpeg_detail = str(getattr(result, "stdout", "") or "").strip()
+            if ffmpeg_detail:
+                details.append(ffmpeg_detail)
+            if vspipe_detail:
+                details.append(vspipe_detail)
+            suffix = f": {' | '.join(details)}" if details else ""
+            raise JobError(f"{stage} FFmpeg stage failed with exit code {returncode}{suffix}")
         qtgmc_returncode = (
             getattr(qtgmc_process, "returncode", 0) if qtgmc_process is not None else 0
         )
-        if qtgmc_returncode != 0:
-            detail = str(getattr(qtgmc_process, "stdout", "") or "").strip()
-            suffix = f": {detail}" if detail else ""
+        if qtgmc_returncode not in {0, None} and not _vspipe_exit_is_broken_pipe(
+            qtgmc_returncode, vspipe_detail
+        ):
+            self._ensure_partial(partial)
+            suffix = f": {vspipe_detail}" if vspipe_detail else ""
             raise JobError(
                 f"{stage} QTGMC stage failed with vspipe exit code "
                 f"{qtgmc_returncode}{suffix}"
             )
-        returncode = getattr(result, "returncode", 0)
-        if returncode != 0:
-            self._ensure_partial(partial)
-            detail = str(getattr(result, "stdout", "") or "").strip()
-            suffix = f": {detail}" if detail else ""
-            raise JobError(f"{stage} FFmpeg stage failed with exit code {returncode}{suffix}")
         if not partial.exists():
             raise JobError(f"{stage} completed without creating {partial}")
         self._promote(partial, artifact)

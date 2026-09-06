@@ -158,6 +158,12 @@ class ManagedProcess:
         return self._process.stdout
 
     @property
+    def stderr(self):
+        """Return the child stderr stream for process pipelines."""
+
+        return self._process.stderr
+
+    @property
     def returncode(self) -> int | None:
         """Return the current process return code, if it has exited."""
 
