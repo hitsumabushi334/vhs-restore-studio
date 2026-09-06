@@ -175,6 +175,43 @@ def _vspipe_y4m_args(executable: str | Path) -> list[str]:
     return ["--y4m"]
 
 
+def _wait_process_exit(process: object, timeout: float = 5.0) -> None:
+    """Reap a killed producer so its stderr pipe can reach EOF."""
+
+    wait = getattr(process, "wait", None)
+    if not callable(wait):
+        return
+
+    def call_wait(limit: float) -> None:
+        try:
+            wait(timeout=limit)
+        except TypeError:
+            wait()
+
+    try:
+        call_wait(timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        return
+
+    for target in (process, getattr(process, "_process", None)):
+        if target is None:
+            continue
+        kill = getattr(target, "kill", None)
+        if not callable(kill):
+            continue
+        try:
+            kill()
+        except Exception:
+            pass
+    try:
+        call_wait(timeout)
+    except Exception:
+        return
+
+
 def _qtgmc_stderr_text(process: object) -> str:
     """Return drained VSPipe stderr for QTGMC JobError messages."""
 
@@ -833,6 +870,7 @@ class RestoreJobRunner:
                     qtgmc_process.kill()
                 except BaseException:
                     pass
+                _wait_process_exit(qtgmc_process)
             if self._is_cancelled():
                 self._ensure_partial(partial)
                 self._raise_if_cancel_failed()
