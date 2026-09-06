@@ -65,10 +65,31 @@ def test_clean_5994p_progressive_source_disables_deinterlace():
     assert decision.filter_expression is None
     assert decision.qtgmc_script is None
 
-def test_mixed_5994p_source_stays_progressive_in_auto_mode():
+def test_mixed_5994p_source_without_progressive_metadata_is_deinterlaced():
     analysis = _source(
         classification="Mixed",
         frame_rate=60000 / 1001,
+    )
+
+    decision = decide_deinterlace(
+        analysis,
+        RestoreSettings(),
+        qtgmc_available=True,
+    )
+
+    assert decision.enabled is True
+    assert decision.method == "qtgmc"
+    assert decision.field_order == "TFF"
+    assert decision.double_rate is True
+    assert decision.output_frame_rate == pytest.approx(120000 / 1001)
+    assert "interlaced source" in decision.reason
+
+
+def test_mixed_5994p_source_with_progressive_metadata_stays_progressive():
+    analysis = _source(
+        classification="Mixed",
+        frame_rate=60000 / 1001,
+        field_order="Progressive",
     )
 
     decision = decide_deinterlace(
@@ -83,6 +104,52 @@ def test_mixed_5994p_source_stays_progressive_in_auto_mode():
     assert decision.output_frame_rate == pytest.approx(60000 / 1001)
     assert "already-progressive" in decision.reason
     assert "59.94p" in decision.reason
+
+
+def test_mixed_5994p_source_uses_interlace_progressive_metadata():
+    analysis = _source(
+        classification="Mixed",
+        frame_rate=60000 / 1001,
+    ).with_interlace(
+        InterlaceAnalysis(
+            "Mixed",
+            confidence=1.0,
+            metadata_field_order="prog",
+        )
+    )
+
+    decision = decide_deinterlace(analysis, RestoreSettings(), qtgmc_available=True)
+
+    assert decision.enabled is False
+    assert decision.reason == "Source is already-progressive 59.94p; deinterlace disabled."
+
+
+def test_tff_5994p_source_is_deinterlaced_in_auto_mode():
+    analysis = _source(
+        classification="TFF",
+        frame_rate=60000 / 1001,
+        field_order="TFF",
+    )
+
+    decision = decide_deinterlace(analysis, RestoreSettings(), qtgmc_available=True)
+
+    assert decision.enabled is True
+    assert decision.field_order == "TFF"
+    assert decision.double_rate is True
+
+
+def test_mixed_50fps_source_with_interlaced_metadata_is_deinterlaced():
+    analysis = _source(
+        classification="Mixed",
+        frame_rate=50.0,
+        field_order="TFF",
+    )
+
+    decision = decide_deinterlace(analysis, RestoreSettings(), qtgmc_available=True)
+
+    assert decision.enabled is True
+    assert decision.field_order == "TFF"
+    assert decision.double_rate is True
 
 
 def test_forced_tff_still_deinterlaces_5994p_source():

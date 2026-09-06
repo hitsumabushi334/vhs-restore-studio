@@ -39,7 +39,11 @@ def _windows_pid_exists(pid: int) -> bool:
         ) from exc
 
     if result.returncode != 0:
-        return False
+        detail = (result.stderr or result.stdout or "").strip()
+        raise ProcessTreeTerminationError(
+            f"could not verify whether process {pid} is still running"
+            + (f": {detail}" if detail else "")
+        )
 
     for row in csv.reader(io.StringIO(result.stdout or "")):
         if len(row) > 1 and row[1].strip() == str(pid):
@@ -47,12 +51,29 @@ def _windows_pid_exists(pid: int) -> bool:
     return False
 
 
+def _taskkill_reports_missing_process(result: CompletedProcess[str]) -> bool:
+    """Return whether taskkill explicitly reports that the PID is gone."""
+
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    normalized = output.casefold()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "not found",
+            "not running",
+            "does not exist",
+            "no running instance",
+            "no such process",
+        )
+    )
+
+
 def kill_process_tree(pid: int) -> None:
     """Terminate a process and its descendants using local OS facilities.
 
     A missing PID is treated as already terminated.  Windows failures are
-    surfaced when ``taskkill`` fails and ``tasklist`` confirms the PID remains
-    live, so callers cannot mistake a rejected cancellation for success.
+    surfaced when ``taskkill`` fails and the PID cannot be verified as gone,
+    so callers cannot mistake a rejected cancellation for success.
     """
 
     if pid <= 0:
@@ -76,6 +97,8 @@ def kill_process_tree(pid: int) -> None:
 
         if result.returncode == 0:
             return
+        if _taskkill_reports_missing_process(result):
+            return
         if not _windows_pid_exists(pid):
             return
 
@@ -93,6 +116,8 @@ def kill_process_tree(pid: int) -> None:
         raise ProcessTreeTerminationError(
             f"permission denied while terminating process {pid}"
         ) from exc
+
+
 
 
 class ManagedProcess:

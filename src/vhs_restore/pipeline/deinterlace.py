@@ -98,11 +98,19 @@ def _frame_rate(analysis: SourceInfo | InterlaceAnalysis | object) -> float | No
 
 
 def _metadata_field_order(analysis: SourceInfo | InterlaceAnalysis | object) -> str | None:
-    value = getattr(analysis, "field_order", None)
-    if value is None:
+    if isinstance(analysis, SourceInfo):
+        normalized = normalize_field_order(analysis.field_order)
+        if normalized is not None:
+            return normalized
+        if analysis.interlace is not None:
+            return normalize_field_order(analysis.interlace.metadata_field_order)
         return None
-    normalized = normalize_field_order(str(value))
-    return normalized if normalized in {"TFF", "BFF"} else None
+    if isinstance(analysis, InterlaceAnalysis):
+        return normalize_field_order(analysis.metadata_field_order)
+    value = getattr(analysis, "metadata_field_order", None)
+    if value is None:
+        value = getattr(analysis, "field_order", None)
+    return normalize_field_order(str(value)) if value is not None else None
 
 
 def _source_path(analysis: SourceInfo | InterlaceAnalysis | object) -> Path | None:
@@ -124,21 +132,27 @@ def _resolve_interlaced_field_order(
 ) -> str:
     if classification in {"TFF", "BFF"}:
         return classification
-    return _metadata_field_order(analysis) or "TFF"
+    metadata_field_order = _metadata_field_order(analysis)
+    return metadata_field_order if metadata_field_order in {"TFF", "BFF"} else "TFF"
 
 
 def _is_clean_progressive_5994p(
     classification: str | None,
     frame_rate: float | None,
+    analysis: SourceInfo | InterlaceAnalysis | object,
 ) -> bool:
-    return (
-        classification in {"Progressive", *_INTERLACED_CLASSIFICATIONS}
-        and frame_rate is not None
-        and (
+    if (
+        frame_rate is None
+        or not (
             math.isclose(frame_rate, 60000 / 1001, rel_tol=0.0, abs_tol=0.02)
             or frame_rate >= 50.0
         )
-    )
+    ):
+        return False
+    if classification == "Progressive":
+        return True
+    return classification == "Mixed" and _metadata_field_order(analysis) == "Progressive"
+
 
 
 def _qtgmc_preset_name(value: str) -> str:
@@ -166,7 +180,6 @@ def generate_qtgmc_script(
     qtgmc_preset = _qtgmc_preset_name(preset)
     return "\n".join(
         (
-            "import vapoursynth as vs",
             "import havsfunc",
             "",
             "core = vs.core",
@@ -194,9 +207,10 @@ def decide_deinterlace(
 ) -> DeinterlaceDecision:
     """Resolve whether and how a source should be deinterlaced.
 
-    ``auto`` follows idet/source analysis.  Clean progressive or high-frame-rate
-    sources are explicitly kept progressive, preventing a second double-rate
-    pass.  ``tff`` and ``bff`` remain available as deliberate manual overrides.
+    ``auto`` follows idet/source analysis. Clean progressive sources and Mixed
+    sources with positive progressive metadata stay progressive at high rates,
+    preventing a second double-rate pass. ``tff`` and ``bff`` remain available
+    as deliberate manual overrides.
     """
 
     settings = settings or RestoreSettings()
@@ -213,7 +227,7 @@ def decide_deinterlace(
         enabled = True
         field_order = forced_order
         reason = f"{forced_order} deinterlace forced by settings."
-    elif _is_clean_progressive_5994p(classification, frame_rate):
+    elif _is_clean_progressive_5994p(classification, frame_rate, analysis):
         enabled = False
         field_order = None
         if frame_rate is not None and math.isclose(

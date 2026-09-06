@@ -143,7 +143,7 @@ def test_run_command_callback_failure_kills_and_waits_for_child(tmp_path: Path):
             kill_process_tree(child_pid)
 
 
-def test_windows_pid_exists_treats_tasklist_failure_as_missing(
+def test_windows_pid_exists_treats_tasklist_failure_as_unverifiable(
     monkeypatch: pytest.MonkeyPatch,
 ):
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -156,7 +156,8 @@ def test_windows_pid_exists_treats_tasklist_failure_as_missing(
 
     monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
 
-    assert process_utils._windows_pid_exists(2468) is False
+    with pytest.raises(process_utils.ProcessTreeTerminationError):
+        process_utils._windows_pid_exists(2468)
 
 
 def test_windows_pid_exists_keeps_a_matching_csv_row_live(
@@ -258,6 +259,32 @@ def test_kill_process_tree_surfaces_taskkill_failure_for_a_live_process(
 
     assert calls[0][0] == ["taskkill", "/PID", "2468", "/T", "/F"]
     assert calls[0][1]["shell"] is False
+
+
+def test_kill_process_tree_raises_when_taskkill_and_tasklist_are_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="ERROR: Access is denied.",
+        )
+
+    monkeypatch.setattr(process_utils.os, "name", "nt")
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    with pytest.raises(process_utils.ProcessTreeTerminationError):
+        kill_process_tree(2468)
+
+    assert calls == [
+        ["taskkill", "/PID", "2468", "/T", "/F"],
+        ["tasklist", "/FI", "PID eq 2468", "/FO", "CSV", "/NH"],
+    ]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows taskkill process trees")

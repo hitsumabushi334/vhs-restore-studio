@@ -56,6 +56,8 @@ def make_video_clip(
                 f"setfield={normalized_order}"
             )
 
+    video_filter = f"{video_filter},setsar=8/9"
+
     argv = [
         str(_FFMPEG),
         "-hide_banner",
