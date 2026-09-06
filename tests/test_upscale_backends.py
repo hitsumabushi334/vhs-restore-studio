@@ -203,9 +203,53 @@ def test_video2x_upscale_uses_argv_and_a_safe_unique_output(
             "-s",
             "2",
             "--realesrgan-model",
-            "realesrgan-x4plus",
+            "realesr-animevideov3",
         ]
     ]
+
+
+def test_video2x_maps_ncnn_x4plus_to_plus_at_scale_4(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.find_tool",
+        lambda _: Path("C:/tools/video2x.exe"),
+    )
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.run_command",
+        lambda argv, **_: calls.append(argv)
+        or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+
+    Video2XBackend().upscale(source, tmp_path / "out.mp4", scale=4, model="realesrgan-x4plus")
+
+    assert calls[0][-2:] == ["--realesrgan-model", "realesrgan-plus"]
+
+
+def test_video2x_omits_unknown_realesrgan_model_instead_of_passing_it(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.find_tool",
+        lambda _: Path("C:/tools/video2x.exe"),
+    )
+    monkeypatch.setattr(
+        "vhs_restore.upscale.video2x.run_command",
+        lambda argv, **_: calls.append(argv)
+        or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+
+    Video2XBackend().upscale(source, tmp_path / "out.mp4", scale=2, model="not-a-model")
+
+    assert "--realesrgan-model" not in calls[0]
 
 
 def test_realesrgan_upscale_uses_vulkan_cli_and_preserves_unicode_paths(

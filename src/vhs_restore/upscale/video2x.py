@@ -15,6 +15,33 @@ from .base import (
     validate_scale,
 )
 
+# Video2X 6.x --realesrgan-model values. Packaged presets still use the
+# realesrgan-ncnn-vulkan names, which Video2X rejects as invalid arguments.
+_VIDEO2X_REALESRGAN_MODELS = {
+    "realesr-animevideov3": "realesr-animevideov3",
+    "realesr-animevideov3-x2": "realesr-animevideov3",
+    "realesr-animevideov3-x3": "realesr-animevideov3",
+    "realesr-animevideov3-x4": "realesr-animevideov3",
+    "realesrgan-plus": "realesrgan-plus",
+    "realesrgan-plus-anime": "realesrgan-plus-anime",
+    "realesrgan-plus-x4": "realesrgan-plus",
+    "realesrgan-plus-anime-x4": "realesrgan-plus-anime",
+    "realesrgan-x4plus": "realesrgan-plus",
+    "realesrgan-x4plus-anime": "realesrgan-plus-anime",
+}
+_FOUR_X_ONLY_MODELS = frozenset({"realesrgan-plus", "realesrgan-plus-anime"})
+
+
+def resolve_realesrgan_model(model: str | None, scale: int) -> str | None:
+    """Map ncnn aliases onto Video2X models; drop names the CLI rejects."""
+
+    if not model:
+        return None
+    mapped = _VIDEO2X_REALESRGAN_MODELS.get(model.strip().casefold())
+    if mapped in _FOUR_X_ONLY_MODELS and scale != 4:
+        return "realesr-animevideov3"
+    return mapped
+
 
 @dataclass(frozen=True, slots=True)
 class Video2XBackend:
@@ -68,8 +95,9 @@ class Video2XBackend:
             "-s",
             str(scale),
         ]
-        if model:
-            argv.extend(("--realesrgan-model", str(model)))
+        resolved = resolve_realesrgan_model(model, scale)
+        if resolved:
+            argv.extend(("--realesrgan-model", resolved))
 
         try:
             result = run_command(argv)
@@ -82,4 +110,4 @@ class Video2XBackend:
 Video2xBackend = Video2XBackend
 
 
-__all__ = ["Video2XBackend", "Video2xBackend"]
+__all__ = ["Video2XBackend", "Video2xBackend", "resolve_realesrgan_model"]
