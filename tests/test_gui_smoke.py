@@ -160,3 +160,34 @@ def test_strong_ai_advanced_dialog_shows_japanese_warning():
 
     dialog.close()
     app.processEvents()
+
+
+def test_gui_diagnostics_show_realesrgan_image_cli_reason_not_vulkan_failure():
+    from pathlib import Path
+
+    from vhs_restore.gui.diagnostics import format_dependency_report
+    from vhs_restore.utils.deps import DependencyReport, ToolStatus
+
+    realesrgan = ToolStatus(
+        name="realesrgan-ncnn-vulkan",
+        executable="realesrgan-ncnn-vulkan",
+        required=False,
+        path=Path("C:/tools/realesrgan-ncnn-vulkan.exe"),
+        available=True,
+        version="0.2.0",
+        capability_available=False,
+        capability_error="image CLI only; not used for video upscale",
+    )
+    report = DependencyReport(
+        tools={"realesrgan-ncnn-vulkan": realesrgan},
+        tool_versions={"realesrgan-ncnn-vulkan": "0.2.0"},
+        expected_versions={},
+        required_missing=(),
+        optional_missing=(),
+        messages=("AI backend unavailable; classical scaling will be used.",),
+        selected_ai_backend=None,
+    )
+    text = format_dependency_report(report)
+    assert "image CLI only; not used for video upscale" in text
+    assert "Vulkan probe failed" not in text
+    assert "AI backend unavailable" in text

@@ -474,9 +474,10 @@ def test_detect_dependencies_reports_missing_ai_backend_without_failing(
     assert any("AI backend unavailable" in message for message in report.messages)
     assert report.tools["video2x"].available is False
     assert report.tools["realesrgan-ncnn-vulkan"].available is False
+    assert report.tools["realesrgan-ncnn-vulkan"].capability_available is False
 
 
-def test_detect_dependencies_marks_a_vulkan_ai_backend_available(
+def test_realesrgan_version_banner_does_not_select_a_video_ai_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
     deps = _load_deps_module()
@@ -493,12 +494,17 @@ def test_detect_dependencies_marks_a_vulkan_ai_backend_available(
         lambda argv, **_: subprocess.CompletedProcess(
             argv,
             0,
-            stdout=f"{Path(argv[0]).stem} version 1.0.0\n",
+            stdout=f"{Path(argv[0]).stem} version 0.2.0\n",
             stderr=None,
         ),
     )
 
     report = deps.detect_dependencies()
 
-    assert report.ai_backend_available is True
-    assert not any("AI backend unavailable" in message for message in report.messages)
+    realesrgan = report.tools["realesrgan-ncnn-vulkan"]
+    assert realesrgan.available is True
+    assert realesrgan.version == "0.2.0"
+    assert realesrgan.capability_available is False
+    assert report.selected_ai_backend is None
+    assert report.ai_backend_available is False
+    assert any("AI backend unavailable" in message for message in report.messages)

@@ -27,9 +27,10 @@ def format_dependency_report(report: DependencyReport) -> str:
             version = f" version {status.version}" if status.version else ""
             detail = f"{status.path}{version}"
             if status.capability_available is False:
-                detail += ": Vulkan probe failed"
                 if status.capability_error:
-                    detail += f" ({status.capability_error})"
+                    detail += f": {status.capability_error}"
+                else:
+                    detail += ": Vulkan probe failed"
         lines.append(f"[{state:<8}] {name}: {detail}")
 
     lines.append("")

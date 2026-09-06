@@ -435,24 +435,15 @@ def _select_ai_backend(
                 + "."
             )
 
-    realesrgan = statuses["realesrgan-ncnn-vulkan"]
-    if realesrgan.available:
-        # A version banner is enough to treat the binary as installed. Usage
-        # output only proves the image CLI starts; it is not a video backend.
-        if realesrgan.version is not None:
-            realesrgan = replace(realesrgan, capability_available=True)
-        else:
-            realesrgan = replace(
-                realesrgan,
-                capability_available=False,
-                capability_error="image CLI only; not used for video upscale",
-            )
-        statuses["realesrgan-ncnn-vulkan"] = realesrgan
+    realesrgan = replace(
+        statuses["realesrgan-ncnn-vulkan"],
+        capability_available=False,
+        capability_error="image CLI only; not used for video upscale",
+    )
+    statuses["realesrgan-ncnn-vulkan"] = realesrgan
 
     if video2x.capability_available:
         return video2x.name
-    if realesrgan.capability_available:
-        return realesrgan.name
     return None
 
 
@@ -578,9 +569,10 @@ def _format_status(status: ToolStatus) -> str:
     if status.version_matches is False:
         detail += f" (expected {status.expected_version})"
     if status.capability_available is False:
-        detail += ": Vulkan probe failed"
         if status.capability_error:
-            detail += f" ({status.capability_error})"
+            detail += f": {status.capability_error}"
+        else:
+            detail += ": Vulkan probe failed"
     return f"[{state:<8}] {status.name}  {detail}"
 
 
