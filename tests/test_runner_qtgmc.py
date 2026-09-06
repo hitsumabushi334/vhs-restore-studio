@@ -16,6 +16,10 @@ from vhs_restore.settings import RestoreSettings
 from vhs_restore.utils.process import start_command as real_start_command
 
 
+def _is_vspipe_command(argv: list[str]) -> bool:
+    return "--y4m" in argv or "--container" in argv
+
+
 def _qtgmc_plan(source: Path, analysis: SourceInfo) -> PipelinePlan:
     script = "import vapoursynth as vs\nimport havsfunc\nclip = vs.core.std.BlankClip()\nclip.set_output()\n"
     decision = DeinterlaceDecision(
@@ -104,7 +108,7 @@ def _run_qtgmc_with_fake_vspipe(
     processes: list[_FakeQTGMCProcess] = []
 
     def fake_start(argv: list[str], **kwargs):
-        if "--y4m" in argv:
+        if _is_vspipe_command(argv):
             process = _FakeQTGMCProcess(vspipe_returncode, vspipe_stderr)
         else:
             Path(argv[-1]).write_bytes(b"encoded")
@@ -138,7 +142,7 @@ def test_qtgmc_unexpected_vspipe_failure_does_not_promote_output(
     plan = _qtgmc_plan(source, analysis)
 
     def fake_start(argv: list[str], **kwargs):
-        if "--y4m" in argv:
+        if _is_vspipe_command(argv):
             return _FakeQTGMCProcess(1, b"Script evaluation failed")
         Path(argv[-1]).write_bytes(b"encoded")
         process = _FakeQTGMCProcess(0)
@@ -204,7 +208,7 @@ def test_qtgmc_plugin_or_script_pipe_errors_are_not_broken_pipe(
     plan = _qtgmc_plan(source, analysis)
 
     def fake_start(argv: list[str], **kwargs):
-        if "--y4m" in argv:
+        if _is_vspipe_command(argv):
             return _FakeQTGMCProcess(1, vspipe_stderr)
         Path(argv[-1]).write_bytes(b"encoded")
         process = _FakeQTGMCProcess(0)
@@ -258,7 +262,7 @@ def test_restore_runs_vspipe_before_ffmpeg_and_trims_vspipe_output(
 
     def fake_start(argv: list[str], **kwargs):
         captured.append(list(argv))
-        if "--y4m" not in argv:
+        if not _is_vspipe_command(argv):
             Path(argv[-1]).write_bytes(b"encoded")
         return real_start_command(
             [sys.executable, "-c", "pass"],
@@ -278,13 +282,18 @@ def test_restore_runs_vspipe_before_ffmpeg_and_trims_vspipe_output(
     assert result.status == "completed"
     assert len(captured) == 2
     vspipe_argv, ffmpeg_argv = captured
-    assert vspipe_argv[0].casefold().endswith("vspipe")
+    assert Path(vspipe_argv[0]).stem.casefold() == "vspipe"
     qtgmc_dir = tmp_path / "job" / "qtgmc"
     output_fps = 60000 / 1001
     expected_start = round(plan.start * output_fps)
     expected_end = expected_start + max(1, round(plan.duration * output_fps)) - 1
+    y4m_args = (
+        ["--container", "y4m"]
+        if vspipe_argv[1:3] == ["--container", "y4m"]
+        else ["--y4m"]
+    )
     assert vspipe_argv[1:] == [
-        "--y4m",
+        *y4m_args,
         "--start",
         str(expected_start),
         "--end",
@@ -322,7 +331,7 @@ def test_qtgmc_does_not_delete_source_named_like_intermediate(
     plan = _qtgmc_plan(source, analysis)
 
     def fake_start(argv: list[str], **kwargs):
-        if "--y4m" not in argv:
+        if not _is_vspipe_command(argv):
             Path(argv[-1]).write_bytes(b"encoded")
         return real_start_command(
             [sys.executable, "-c", "pass"],
@@ -389,7 +398,7 @@ def test_qtgmc_start_failure_is_a_job_error(tmp_path: Path, monkeypatch: pytest.
         ).run(source, analysis, RestoreSettings(), output)
 
     assert len(captured) == 1
-    assert "--y4m" in captured[0]
+    assert _is_vspipe_command(captured[0])
     assert not output.exists()
 
 
@@ -434,7 +443,7 @@ def test_encode_stage_does_not_rerun_qtgmc_for_non_source_input(
     )
 
     assert len(captured) == 1
-    assert "--y4m" not in captured[0]
+    assert not _is_vspipe_command(captured[0])
     assert captured[0][captured[0].index("-i") + 1] == str(input_path)
     assert str(source) not in captured[0]
     assert "-map" not in captured[0]

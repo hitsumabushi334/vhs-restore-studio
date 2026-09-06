@@ -151,6 +151,30 @@ def _as_number(value: float | None) -> str | None:
     return f"{float(value):g}"
 
 
+def _vspipe_y4m_args(executable: str | Path) -> list[str]:
+    """Return the VSPipe flag that writes Y4M to stdout.
+
+    VapourSynth R74+ replaced ``--y4m`` with ``--container y4m``.
+    """
+
+    try:
+        result = subprocess.run(
+            [str(executable), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ["--y4m"]
+    help_text = f"{result.stdout}\n{result.stderr}".casefold()
+    if "--container" in help_text:
+        return ["--container", "y4m"]
+    return ["--y4m"]
+
+
 def _vspipe_exit_is_broken_pipe(returncode: int | None, stderr_text: str) -> bool:
     """Return whether a vspipe failure is the expected closed-pipe exit."""
 
@@ -616,7 +640,7 @@ class RestoreJobRunner:
             vspipe_range.extend(("--start", str(start_frame), "--end", str(end_frame)))
         elif start is not None:
             vspipe_range.extend(("--start", str(start_frame)))
-        argv = [str(executable), "--y4m", *vspipe_range, str(script_path), "-"]
+        argv = [str(executable), *_vspipe_y4m_args(executable), *vspipe_range, str(script_path), "-"]
         if self._logger is not None:
             self._logger.info("stage=%s argv=%r", stage, argv)
 

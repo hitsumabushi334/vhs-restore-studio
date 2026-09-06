@@ -13,6 +13,7 @@ EXPECTED_VERSIONS = {
     "ffmpeg": "8.1.1-full (Gyan)",
     "video2x": "6.4.0",
     "realesrgan-ncnn-vulkan": "v0.2.0",
+    "vapoursynth": "R79",
 }
 
 
@@ -78,3 +79,16 @@ def test_doctor_checks_project_venv_python():
     assert "$VenvPython = Join-Path" in doctor_script
     assert "Test-VenvPython" in doctor_script
     assert 'Test-Tool -Name "python"' not in doctor_script
+
+
+def test_install_script_bootstraps_optional_backends():
+    install_script = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert (ROOT / "install.ps1").is_file()
+    assert "vhs_restore.utils.bootstrap" in install_script
+
+
+def test_setup_script_runs_optional_bootstrap():
+    setup_script = (ROOT / "setup.ps1").read_text(encoding="utf-8")
+    assert "bootstrap" in setup_script or "install.ps1" in setup_script
+
+

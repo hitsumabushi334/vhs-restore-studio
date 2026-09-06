@@ -23,8 +23,15 @@ From PowerShell in this directory:
 .\setup.ps1
 ```
 
-The script creates `.venv` and installs the project in editable mode with its
-development tools.
+The script creates `.venv`, installs the project in editable mode with its
+development tools, and runs the optional backend bootstrap.
+
+To refresh optional Video2X, Real-ESRGAN, and QTGMC components without
+re-running the full setup:
+
+```powershell
+.\install.ps1
+```
 
 ## Launch the GUI
 
@@ -70,12 +77,11 @@ the GUI unusable.
 
 ## Known issues and optional backends
 
+- Optional installs from `install.ps1` and setup bootstrap are best-effort.
+  Missing `vspipe`/QTGMC, `video2x`, or `realesrgan-ncnn-vulkan` still falls
+  back to `bwdif` and the classical scaler.
 - `doctor.ps1` may exit with status 1 if `ffmpeg --version` returns a
   non-zero code, even when FFmpeg itself runs correctly.
-- `vspipe`/QTGMC are not installed in the baseline environment; the pipeline
-  uses the `bwdif` deinterlace fallback.
-- `video2x` and `realesrgan-ncnn-vulkan` are not installed in the baseline
-  environment; the pipeline uses the classical scaler.
 - Real-ESRGAN is an image CLI and is not used for video processing.
 
 See `versions.json` for the initial dependency/version record and

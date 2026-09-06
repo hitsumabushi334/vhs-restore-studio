@@ -19,8 +19,13 @@ if (-not (Test-VenvPython)) {
     exit 1
 }
 
+$VendorRoots = @(
+    (Join-Path $ProjectRoot "vendor\video2x"),
+    (Join-Path $ProjectRoot "vendor\realesrgan-ncnn-vulkan"),
+    (Join-Path $ProjectRoot "vendor\vapoursynth")
+)
+
 $VenvScripts = Split-Path -Parent $VenvPython
-$env:PATH = "$VenvScripts;$env:PATH"
 $SourceRoot = Join-Path $ProjectRoot "src"
 if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
     $env:PYTHONPATH = $SourceRoot
@@ -28,7 +33,7 @@ if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
     $env:PYTHONPATH = "$SourceRoot;$env:PYTHONPATH"
 }
 
-Write-Host "Running dependency diagnostics with the project venv."
+$env:PATH = (@($VenvScripts) + $VendorRoots + @($env:PATH)) -join ";"
 & $VenvPython -m vhs_restore.utils.deps
 $DependencyExitCode = $LASTEXITCODE
 

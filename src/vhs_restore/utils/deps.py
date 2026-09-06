@@ -45,7 +45,8 @@ clip = vs.core.std.BlankClip(
     length=8,
     format=vs.YUV420P8,
 )
-havsfunc.QTGMC(clip, Preset="Fast", FPSDivisor=2).set_output()
+clip = vs.core.std.SetFrameProps(clip, _FieldBased=2)
+havsfunc.QTGMC(clip, Preset="Fast", TFF=True, FPSDivisor=2).set_output()
 """
 
 
@@ -304,8 +305,24 @@ def _probe_qtgmc(path: Path) -> tuple[bool, str | None]:
     except Exception as exc:
         return False, _compact_detail(str(exc))
 
+    output = _command_output(result)
+    normalized = output.casefold()
+    if any(
+        marker in normalized
+        for marker in (
+            "python exception",
+            "script evaluation failed",
+            "script error",
+            "no module named",
+            "qtgmc is unavailable",
+        )
+    ):
+        return False, _compact_detail(output) or f"command exited with code {result.returncode}"
     if result.returncode != 0:
-        detail = _compact_detail(_command_output(result))
+        # VSPipe may exit non-zero while only printing API-deprecation warnings.
+        if "warning:" in normalized and "error" not in normalized:
+            return True, None
+        detail = _compact_detail(output)
         return False, detail or f"command exited with code {result.returncode}"
     return True, None
 
@@ -316,17 +333,48 @@ def _probe_video2x_vulkan(path: Path) -> tuple[bool, str | None]:
     try:
         result = run_command([str(path), "--list-gpus"])
     except Exception as exc:
-        return False, _compact_detail(str(exc))
+        gpu_error = _compact_detail(str(exc))
+        result = None
+        gpu_error = gpu_error
+    else:
+        gpu_output = _command_output(result)
+        if result.returncode == 0:
+            if _VULKAN_DEVICE_RE.search(gpu_output) is not None:
+                return True, None
+            detail = _compact_detail(gpu_output)
+            return False, (
+                f"no Vulkan-capable GPU reported: {detail}"
+                if detail
+                else "no Vulkan-capable GPU reported"
+            )
+        gpu_error = _compact_detail(gpu_output) or (
+            f"command exited with code {result.returncode}"
+        )
+        unrecognized = "unrecognised option" in gpu_error.casefold() or (
+            "unrecognized option" in gpu_error.casefold()
+        )
+        if not unrecognized:
+            return False, gpu_error
 
-    output = _command_output(result)
-    if result.returncode != 0:
-        detail = _compact_detail(output)
-        return False, detail or f"command exited with code {result.returncode}"
-    if _VULKAN_DEVICE_RE.search(output) is None:
-        detail = _compact_detail(output)
-        suffix = f": {detail}" if detail else ""
-        return False, f"no Vulkan-capable GPU reported{suffix}"
-    return True, None
+    last_error = gpu_error
+    for flag in ("--list-devices", "-l"):
+        try:
+            result = run_command([str(path), flag])
+        except Exception as exc:
+            last_error = _compact_detail(str(exc))
+            continue
+        output = _command_output(result)
+        if result.returncode != 0:
+            last_error = _compact_detail(output) or (
+                f"command exited with code {result.returncode}"
+            )
+            continue
+        normalized = output.casefold()
+        if not output.strip() or "no vulkan" in normalized or "no device" in normalized:
+            last_error = _compact_detail(output) or "no Vulkan-capable GPU reported"
+            continue
+        return True, None
+    return False, last_error
 
 
 def probe_video2x_vulkan(path: str | Path) -> tuple[bool, str | None]:

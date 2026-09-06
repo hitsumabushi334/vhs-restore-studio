@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param()
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".")).Path
 $VenvPath = Join-Path $ProjectRoot ".venv"
+$VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 
 function Assert-PythonVersion {
     param(
@@ -27,47 +28,43 @@ function Assert-PythonVersion {
     }
 }
 
-$PyLauncher = Get-Command py -ErrorAction SilentlyContinue
-if ($null -ne $PyLauncher) {
-    if (-not (Test-Path -LiteralPath $VenvPath)) {
+function Ensure-ProjectVenv {
+    if (Test-Path -LiteralPath $VenvPython) {
+        return
+    }
+
+    $PyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($null -ne $PyLauncher) {
         & $PyLauncher.Source -3.12 -m venv $VenvPath
         if ($LASTEXITCODE -ne 0) {
             throw "Python 3.12 venv creation failed."
         }
+        return
     }
-} else {
+
     $Python = Get-Command python -ErrorAction SilentlyContinue
     if ($null -eq $Python) {
-        throw "Python 3.12 or newer is required."
+        throw "Python 3.12 or newer is required. Run .\setup.ps1 first."
     }
+
     Assert-PythonVersion -PythonPath $Python.Source
-    if (-not (Test-Path -LiteralPath $VenvPath)) {
-        & $Python.Source -m venv $VenvPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "Python venv creation failed."
-        }
+    & $Python.Source -m venv $VenvPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python venv creation failed."
     }
 }
 
-$VenvPython = Join-Path $VenvPath "Scripts\python.exe"
+try {
+    Ensure-ProjectVenv
+} catch {
+    Write-Host "[FAIL]    $($_.Exception.Message)"
+    exit 1
+}
+
 if (-not (Test-Path -LiteralPath $VenvPython)) {
-    throw "The virtual environment Python executable was not created: $VenvPython"
-}
-
-& $VenvPython -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) {
-    throw "pip upgrade failed."
-}
-
-& $VenvPython -m pip install --editable "$ProjectRoot[dev]"
-if ($LASTEXITCODE -ne 0) {
-    throw "Editable package installation failed."
-}
-
-Write-Host "Installing optional vendor backends (best effort)."
-& $VenvPython -m vhs_restore.utils.bootstrap
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[WARN]    Optional backend bootstrap reported a non-zero exit code; continuing."
+    Write-Host "[FAIL]    Virtual environment Python executable was not created: $VenvPython"
+    Write-Host "Run .\setup.ps1 first."
+    exit 1
 }
 
 $VenvScripts = Split-Path -Parent $VenvPython
@@ -79,10 +76,10 @@ if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
     $env:PYTHONPATH = "$SourceRoot;$env:PYTHONPATH"
 }
 
-Write-Host "Running dependency diagnostics."
-& $VenvPython -m vhs_restore.utils.deps
+Write-Host "Installing optional vendor backends (best effort)."
+& $VenvPython -m vhs_restore.utils.bootstrap
 if ($LASTEXITCODE -ne 0) {
-    throw "Required local dependencies are missing; run .\doctor.ps1 for details."
+    Write-Host "[WARN]    Optional backend bootstrap reported a non-zero exit code; continuing."
 }
 
-Write-Host "VHS Restore Studio environment ready: $VenvPath"
+exit 0
