@@ -80,8 +80,8 @@ the GUI unusable.
 - Optional installs from `install.ps1` and setup bootstrap are best-effort.
   Missing `vspipe`/QTGMC, `video2x`, or `realesrgan-ncnn-vulkan` still falls
   back to `bwdif` and the classical scaler.
-- `doctor.ps1` may exit with status 1 if `ffmpeg --version` returns a
-  non-zero code, even when FFmpeg itself runs correctly.
+- FFmpeg/ffprobe are resolved from PATH (for example WinGet Gyan). They are
+  not installed into `.venv`.
 - Real-ESRGAN is an image CLI and is not used for video processing.
 
 See `versions.json` for the initial dependency/version record and

@@ -55,8 +55,8 @@ class ToolStatus:
     """The observed state of one local executable.
 
     ``found`` means that PATH resolution returned an executable.  ``available``
-    additionally requires a successful ``--version`` probe, so a broken
-    executable cannot make the dependency report ready.
+    additionally requires a successful version probe (or, for Real-ESRGAN,
+    a usage banner proving the image CLI starts).
     """
 
     name: str
@@ -278,18 +278,58 @@ def _compact_detail(detail: str) -> str:
     return compact[:300]
 
 
-def _read_tool_version(path: Path) -> tuple[str | None, str | None]:
-    try:
-        result = run_command([str(path), "--version"])
-    except Exception as exc:
-        return None, _compact_detail(str(exc))
+def _output_looks_like_usage(output: str) -> bool:
+    normalized = output.casefold()
+    return "usage:" in normalized or "show this help" in normalized
 
-    output = _command_output(result)
-    version = _extract_version(output)
-    if result.returncode != 0:
-        detail = _compact_detail(output)
-        return version, detail or f"command exited with code {result.returncode}"
-    return version, None
+
+def _looks_like_named_banner(stem: str, output: str) -> bool:
+    """Return whether output names this executable and a version banner."""
+
+    if not output:
+        return False
+    name = Path(stem).stem.casefold()
+    if not name or name.startswith("realesrgan"):
+        return False
+    return re.search(rf"\b{re.escape(name)}\s+version\b", output, re.IGNORECASE) is not None
+
+
+def _read_tool_version(path: Path) -> tuple[str | None, str | None]:
+    """Probe a tool without treating GNU/FFmpeg flag differences as failure.
+
+    Gyan FFmpeg 8 accepts ``-version`` (exit 0) but ``--version`` prints a
+    recognizable banner and returns a non-zero code. Prefer a successful
+    ``-version`` result. A bare dotted number in an error is not enough.
+    Usage/help is accepted only for Real-ESRGAN, which has no version flag.
+    """
+
+    stem = path.stem
+    last_error: str | None = None
+    banner_version: str | None = None
+    usage_seen = False
+    for flag in ("--version", "-version"):
+        try:
+            result = run_command([str(path), flag])
+        except Exception as exc:
+            last_error = _compact_detail(str(exc))
+            continue
+
+        output = _command_output(result)
+        version = _extract_version(output)
+        if result.returncode == 0:
+            return version, None
+        if _looks_like_named_banner(stem, output) and version is not None:
+            banner_version = version
+        elif _output_looks_like_usage(output) and stem.casefold().startswith("realesrgan"):
+            usage_seen = True
+        last_error = _compact_detail(output) or (
+            f"command exited with code {result.returncode}"
+        )
+    if banner_version is not None:
+        return banner_version, None
+    if usage_seen:
+        return None, None
+    return None, last_error
 
 
 def _probe_qtgmc(path: Path) -> tuple[bool, str | None]:
@@ -410,9 +450,16 @@ def _select_ai_backend(
 
     realesrgan = statuses["realesrgan-ncnn-vulkan"]
     if realesrgan.available:
-        # The executable is the Vulkan-native Real-ESRGAN backend; its
-        # successful --version probe confirms that this selected binary starts.
-        realesrgan = replace(realesrgan, capability_available=True)
+        # A version banner is enough to treat the binary as installed. Usage
+        # output only proves the image CLI starts; it is not a video backend.
+        if realesrgan.version is not None:
+            realesrgan = replace(realesrgan, capability_available=True)
+        else:
+            realesrgan = replace(
+                realesrgan,
+                capability_available=False,
+                capability_error="image CLI only; not used for video upscale",
+            )
         statuses["realesrgan-ncnn-vulkan"] = realesrgan
 
     if video2x.capability_available:
