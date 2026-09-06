@@ -283,31 +283,22 @@ def _output_looks_like_usage(output: str) -> bool:
     return "usage:" in normalized or "show this help" in normalized
 
 
-def _looks_like_named_banner(stem: str, output: str) -> bool:
-    """Return whether output names this executable and a version banner."""
-
-    if not output:
-        return False
-    name = Path(stem).stem.casefold()
-    if not name or name.startswith("realesrgan"):
-        return False
-    return re.search(rf"\b{re.escape(name)}\s+version\b", output, re.IGNORECASE) is not None
-
-
 def _read_tool_version(path: Path) -> tuple[str | None, str | None]:
     """Probe a tool without treating GNU/FFmpeg flag differences as failure.
 
     Gyan FFmpeg 8 accepts ``-version`` (exit 0) but ``--version`` prints a
-    recognizable banner and returns a non-zero code. Prefer a successful
-    ``-version`` result. A bare dotted number in an error is not enough.
-    Usage/help is accepted only for Real-ESRGAN, which has no version flag.
+    banner and returns a non-zero code. ffmpeg/ffprobe are healthy only when
+    ``-version`` (or another version flag) exits 0. A non-zero banner is never
+    enough. Usage/help is accepted only for Real-ESRGAN, which has no version
+    flag.
     """
 
-    stem = path.stem
+    stem = path.stem.casefold()
+    is_ffmpeg_family = stem in {"ffmpeg", "ffprobe"}
+    flags = ("-version", "--version") if is_ffmpeg_family else ("--version", "-version")
     last_error: str | None = None
-    banner_version: str | None = None
     usage_seen = False
-    for flag in ("--version", "-version"):
+    for flag in flags:
         try:
             result = run_command([str(path), flag])
         except Exception as exc:
@@ -318,15 +309,11 @@ def _read_tool_version(path: Path) -> tuple[str | None, str | None]:
         version = _extract_version(output)
         if result.returncode == 0:
             return version, None
-        if _looks_like_named_banner(stem, output) and version is not None:
-            banner_version = version
-        elif _output_looks_like_usage(output) and stem.casefold().startswith("realesrgan"):
+        if stem.startswith("realesrgan") and _output_looks_like_usage(output):
             usage_seen = True
         last_error = _compact_detail(output) or (
             f"command exited with code {result.returncode}"
         )
-    if banner_version is not None:
-        return banner_version, None
     if usage_seen:
         return None, None
     return None, last_error

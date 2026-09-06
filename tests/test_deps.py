@@ -136,7 +136,10 @@ def test_ffmpeg_banner_on_gnu_version_flag_is_still_available(
         lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
     )
 
+    captured: list[list[str]] = []
+
     def fake_run_command(argv: list[str], **_: object):
+        captured.append(list(argv))
         stem = Path(argv[0]).stem
         flag = argv[1] if len(argv) > 1 else ""
         if flag == "--version":
@@ -159,6 +162,9 @@ def test_ffmpeg_banner_on_gnu_version_flag_is_still_available(
 
     report = deps.detect_dependencies()
 
+    ffmpeg_flags = [argv[1] for argv in captured if Path(argv[0]).stem == "ffmpeg"]
+    assert ffmpeg_flags[0] == "-version"
+    assert "--version" not in ffmpeg_flags
     assert report.ready is True
     assert report.tools["ffmpeg"].available is True
     assert report.tools["ffprobe"].available is True
@@ -228,6 +234,45 @@ def test_ffmpeg_usage_or_bare_runtime_number_is_not_available(
                 1,
                 stdout="This tool requires Windows 10.0 or later\nUsage: ffmpeg-shim [options]\n",
                 stderr=None,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="ffprobe version 8.1.1\n",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(deps, "run_command", fake_run_command)
+
+    report = deps.detect_dependencies()
+
+    ffmpeg = report.tools["ffmpeg"]
+    assert ffmpeg.found is True
+    assert ffmpeg.available is False
+    assert "ffmpeg" in report.required_missing
+    assert report.ready is False
+
+
+def test_ffmpeg_nonzero_version_banner_is_not_enough_without_dash_version(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deps = _load_deps_module()
+    available = {"ffmpeg", "ffprobe"}
+
+    monkeypatch.setattr(
+        deps,
+        "find_tool",
+        lambda name: Path(f"C:/tools/{name}.exe") if name in available else None,
+    )
+
+    def fake_run_command(argv: list[str], **_: object):
+        stem = Path(argv[0]).stem
+        if stem == "ffmpeg":
+            return subprocess.CompletedProcess(
+                argv,
+                2880417800,
+                stdout=None,
+                stderr="ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026\n",
             )
         return subprocess.CompletedProcess(
             argv,
