@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==78.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vhs-restore-studio"
+dynamic = ["version"]
+description = "A local, fidelity-first VHS restoration studio for Windows."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6==6.11.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+]
+
+[project.scripts]
+vhs-restore = "vhs_restore:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "vhs_restore.__version__"}
+
+[tool.setuptools.package-data]
+vhs_restore = ["assets/versions.json", "assets/presets/*.json"]
