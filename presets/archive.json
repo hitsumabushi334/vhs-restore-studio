@@ -14,5 +14,9 @@
   "ai_scale": 1,
   "preserve_aspect": true,
   "aspect_mode": "preserve_4_3",
-  "output_profile": "archive_hq"
+  "output_profile": "archive_hq",
+  "target_resolution": "1440x1080",
+  "target_width": null,
+  "target_height": null,
+  "pipeline_version": 2
 }

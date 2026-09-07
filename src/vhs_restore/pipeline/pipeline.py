@@ -12,6 +12,7 @@ from vhs_restore.utils.deps import detect_dependencies
 
 from .color import build_color_filters
 from .deinterlace import DeinterlaceDecision, decide_deinterlace
+from .geometry import resolve_target_size
 from .restore import build_final_sharpen_filter, build_restore_filters
 
 
@@ -36,6 +37,8 @@ class PipelinePlan:
     warnings: tuple[str, ...] = ()
     settings: RestoreSettings | None = None
     analysis: SourceInfo | None = None
+    final_geometry_filters: tuple[str, ...] = ()
+    final_sharpen_filters: tuple[str, ...] = ()
 
     @property
     def input(self) -> Path:
@@ -173,8 +176,10 @@ def build_pipeline(
         decision = provisional
 
     restore_filters = build_restore_filters(settings)
-    color_filters = build_color_filters(settings)
+    final_geometry_filters = build_color_filters(settings, analysis)
+    color_filters = final_geometry_filters
     sharpen = build_final_sharpen_filter(settings.sharpen_strength)
+    final_sharpen_filters = () if sharpen is None else (sharpen,)
 
     filters: list[str] = []
     stages: list[str] = []
@@ -189,10 +194,10 @@ def build_pipeline(
         stages.append("chroma")
     if settings.artifact_removal_strength > 0.0:
         stages.append("artifact_removal")
-    filters.extend(color_filters)
+    filters.extend(final_geometry_filters)
     stages.append("color")
-    if sharpen is not None:
-        filters.append(sharpen)
+    filters.extend(final_sharpen_filters)
+    if final_sharpen_filters:
         stages.append("sharpen")
 
     warnings: list[str] = []
@@ -209,6 +214,8 @@ def build_pipeline(
         restore_filters=restore_filters,
         color_filters=color_filters,
         stages=tuple(stages),
+        final_geometry_filters=final_geometry_filters,
+        final_sharpen_filters=final_sharpen_filters,
         start=normalized_start,
         duration=normalized_duration,
         output=normalized_output,
@@ -219,4 +226,58 @@ def build_pipeline(
         warnings=tuple(warnings),
         settings=settings,
         analysis=analysis,
+    )
+
+
+def describe_processing_plan(plan: PipelinePlan) -> str:
+    """Return a concise, user-facing summary of the planned processing."""
+
+    settings = plan.settings or RestoreSettings()
+    analysis = plan.analysis
+    if analysis is None:
+        source_size = "unknown size"
+        source_rate = "unknown rate"
+    else:
+        width = getattr(analysis, "width", None)
+        height = getattr(analysis, "height", None)
+        source_size = (
+            f"{width}x{height}" if width is not None and height is not None else "unknown size"
+        )
+        frame_rate = getattr(analysis, "frame_rate", None)
+        if frame_rate is None:
+            frame_rate = getattr(analysis, "fps", None)
+        if frame_rate is None:
+            source_rate = "unknown rate"
+        else:
+            source_rate = f"{float(frame_rate):.2f} fps"
+
+    method = plan.deinterlace.method.upper() if plan.deinterlace.enabled else "off"
+    ai_enabled = bool(getattr(settings, "ai_upscale", False)) and getattr(settings, "ai_scale", 1) > 1
+    ai_backend = getattr(settings, "ai_backend", "none")
+    ai_scale = getattr(settings, "ai_scale", 1)
+    ai_summary = (
+        f"requested {ai_scale}x via {ai_backend}"
+        if ai_enabled
+        else f"off (requested {ai_scale}x via {ai_backend})"
+    )
+    try:
+        final_width, final_height = resolve_target_size(settings, analysis)
+        final_size = f"{final_width}x{final_height}"
+    except ValueError:
+        final_size = "unknown size"
+
+    return "\n".join(
+        (
+            f"Source: {source_size} @ {source_rate}",
+            f"Deinterlace: {method}",
+            (
+                "Strengths: "
+                f"denoise {settings.denoise_strength:.2f}, "
+                f"chroma {settings.chroma_repair_strength:.2f}, "
+                f"artifact {settings.artifact_removal_strength:.2f}, "
+                f"sharpen {settings.sharpen_strength:.2f}"
+            ),
+            f"AI: {ai_summary}",
+            f"Final: {final_size}",
+        )
     )

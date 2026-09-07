@@ -6,7 +6,7 @@
   "denoise_strength": 0.45,
   "chroma_repair_strength": 0.4,
   "artifact_removal_strength": 0.35,
-  "sharpen_strength": 0.25,
+  "sharpen_strength": 0.15,
   "stabilization": false,
   "ai_upscale": true,
   "ai_backend": "realesrgan-ncnn-vulkan",
@@ -14,5 +14,9 @@
   "ai_scale": 4,
   "preserve_aspect": true,
   "aspect_mode": "preserve_4_3",
-  "output_profile": "archive_practical"
+  "output_profile": "archive_practical",
+  "target_resolution": "1440x1080",
+  "target_width": null,
+  "target_height": null,
+  "pipeline_version": 2
 }

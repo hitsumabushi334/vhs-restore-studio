@@ -22,6 +22,20 @@ _OUTPUT_PROFILES = {
     "compatibility",
     "dvd",
 }
+_TARGET_RESOLUTIONS = {
+    "native",
+    "960x720",
+    "1280x960",
+    "1440x1080",
+    "1920x1080",
+    "720x480",
+    "custom",
+}
+
+_LEGACY_TARGET_RESOLUTION = {
+    "dvd": "720x480",
+    "compatibility": "960x720",
+}
 
 _PRESET_FILES = {
     "natural": "natural.json",
@@ -81,6 +95,10 @@ class RestoreSettings:
     preserve_aspect: bool = True
     aspect_mode: str = "preserve_4_3"
     output_profile: str = "archive_practical"
+    target_resolution: str = "1440x1080"
+    target_width: int | None = None
+    target_height: int | None = None
+    pipeline_version: int = 2
 
     @property
     def preset_name(self) -> str:
@@ -119,24 +137,43 @@ class RestoreSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> RestoreSettings:
-        """Build settings from a complete preset mapping.
+        """Build settings from a complete or legacy preset mapping.
 
         Presets are data, so malformed or incomplete files fail at load time
         with a useful ``ValueError`` instead of producing a partial pipeline.
+        The target fields and pipeline version were added after the original
+        preset schema; old complete mappings receive compatible defaults.
         """
 
         if not isinstance(values, Mapping):
             raise ValueError("preset data must be a JSON object")
 
         expected = set(cls.__dataclass_fields__)
-        missing = sorted(expected - set(values))
-        if missing:
-            raise ValueError("preset is missing fields: " + ", ".join(missing))
         unknown = sorted(set(values) - expected)
         if unknown:
             raise ValueError("preset has unknown fields: " + ", ".join(unknown))
 
-        settings = cls(**{field: values[field] for field in expected})
+        legacy_optional = {
+            "pipeline_version",
+            "target_resolution",
+            "target_width",
+            "target_height",
+        }
+        missing = sorted(expected - set(values) - legacy_optional)
+        if missing:
+            raise ValueError("preset is missing fields: " + ", ".join(missing))
+
+        normalized = dict(values)
+        normalized.setdefault("pipeline_version", 2)
+        normalized.setdefault("target_width", None)
+        normalized.setdefault("target_height", None)
+        if "target_resolution" not in normalized:
+            normalized["target_resolution"] = _LEGACY_TARGET_RESOLUTION.get(
+                normalized["output_profile"],
+                "1440x1080",
+            )
+
+        settings = cls(**{field: normalized[field] for field in expected})
         _validate_preset_values(settings)
         return settings
 
@@ -189,6 +226,28 @@ def _validate_preset_values(settings: RestoreSettings) -> None:
         raise ValueError("output_profile must be a string")
     if settings.output_profile not in _OUTPUT_PROFILES:
         raise ValueError(f"invalid output profile: {settings.output_profile!r}")
+    if not isinstance(settings.target_resolution, str):
+        raise ValueError("target_resolution must be a string")
+    if settings.target_resolution not in _TARGET_RESOLUTIONS:
+        raise ValueError(f"invalid target_resolution: {settings.target_resolution!r}")
+    for field in ("target_width", "target_height"):
+        value = getattr(settings, field)
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        ):
+            raise ValueError(f"{field} must be a positive integer or null")
+    if settings.target_resolution == "custom" and (
+        settings.target_width is None or settings.target_height is None
+    ):
+        raise ValueError(
+            "custom target_resolution requires positive target_width and target_height"
+        )
+    if not isinstance(settings.pipeline_version, int) or isinstance(
+        settings.pipeline_version, bool
+    ):
+        raise ValueError("pipeline_version must be an integer")
+    if settings.pipeline_version <= 0:
+        raise ValueError("pipeline_version must be positive")
 
 
 def _preset_key(name: str) -> str:
@@ -298,6 +357,13 @@ def validate_settings(
             _warning(
                 "AI upscaling is enabled without a model; the backend may be unavailable.",
                 "ai-model",
+            )
+        )
+    if settings.output_profile == "dvd" and settings.ai_upscale:
+        warnings.append(
+            _warning(
+                "AI upscaling is usually unnecessary for DVD output because it will be downscaled to 720x480.",
+                "dvd-ai",
             )
         )
 

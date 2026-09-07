@@ -285,6 +285,57 @@ def _merge_pipeline_filter(args: list[str], filter_graph: str) -> list[str]:
     return args
 
 
+_FILTER_SETS = frozenset({"all", "restore", "final"})
+_GEOMETRY_FILTER_PREFIXES = ("scale=", "pad=", "setsar=", "setdar=")
+
+
+def _restore_filter_chain(plan: PipelinePlan) -> tuple[str, ...]:
+    """Return only deinterlace and restoration filters for an intermediate."""
+
+    filters: list[str] = []
+    decision = getattr(plan, "deinterlace", None)
+    deinterlace_filter = getattr(decision, "filter_expression", None)
+    if deinterlace_filter:
+        filters.append(str(deinterlace_filter))
+    for value in getattr(plan, "restore_filters", ()):
+        normalized = str(value)
+        if normalized.startswith(_GEOMETRY_FILTER_PREFIXES) or normalized.startswith(
+            "unsharp="
+        ):
+            continue
+        filters.append(normalized)
+    return tuple(filters)
+
+
+def _final_filter_chain(plan: PipelinePlan) -> tuple[str, ...]:
+    """Return geometry and final sharpening filters for a post-upscale encode."""
+
+    geometry = getattr(plan, "final_geometry_filters", None)
+    if not geometry:
+        geometry = getattr(plan, "color_filters", ())
+    sharpen = getattr(plan, "final_sharpen_filters", None)
+    if not sharpen:
+        # Compatibility with plans created before the explicit final-stage
+        # fields were added.
+        sharpen = tuple(
+            str(value)
+            for value in getattr(plan, "filters", ())
+            if str(value).startswith("unsharp=") and str(value) not in geometry
+        )
+    return tuple(str(value) for value in (*geometry, *sharpen))
+
+
+def _filter_graph_for_set(plan: PipelinePlan, filter_set: str) -> str:
+    if filter_set == "all":
+        graph = getattr(plan, "filter_graph", "")
+        if not graph:
+            graph = ",".join(str(value) for value in getattr(plan, "filters", ()))
+        return str(graph)
+    if filter_set == "restore":
+        return ",".join(_restore_filter_chain(plan))
+    return ",".join(_final_filter_chain(plan))
+
+
 def build_ffmpeg_argv(
     plan: PipelinePlan,
     output: str | os.PathLike[str] | Path,
@@ -294,12 +345,23 @@ def build_ffmpeg_argv(
     encode_args: Iterable[str] = (),
     ffmpeg_executable: str | os.PathLike[str] = "ffmpeg",
     include_pipeline_filters: bool = True,
+    filter_set: str = "all",
     progress: bool = True,
 ) -> list[str]:
-    """Build one shell-free FFmpeg argv list for a pipeline stage."""
+    """Build one shell-free FFmpeg argv list for a pipeline stage.
+
+    ``all`` is the single-pass AI-off graph, ``restore`` is the source-side
+    restoration graph used before AI upscaling, and ``final`` is the geometry
+    and sharpening graph used after an upscaler has produced an intermediate.
+    """
 
     if not isinstance(plan, PipelinePlan):
         raise TypeError("plan must be a PipelinePlan instance")
+    normalized_filter_set = str(filter_set).casefold()
+    if normalized_filter_set not in _FILTER_SETS:
+        raise ValueError(
+            f"filter_set must be one of {', '.join(sorted(_FILTER_SETS))}"
+        )
     input_value = Path(input_path) if input_path is not None else plan.source
     output_value = Path(output)
     audio_value = Path(audio_source) if audio_source is not None else None
@@ -309,9 +371,17 @@ def build_ffmpeg_argv(
     pipe_input = str(input_value) == "pipe:0"
     input_is_source = not pipe_input and _same_path(Path(input_value), plan.source)
     audio_is_source = audio_value is not None and _same_path(audio_value, plan.source)
-    filter_graph = plan.filter_graph if include_pipeline_filters else ""
-    if filter_graph and (input_is_source or pipe_input):
-        _merge_pipeline_filter(args, filter_graph)
+    filter_graph = (
+        _filter_graph_for_set(plan, normalized_filter_set)
+        if include_pipeline_filters
+        else ""
+    )
+    if filter_graph:
+        if normalized_filter_set == "final" or (
+            normalized_filter_set in {"all", "restore"}
+            and (input_is_source or pipe_input)
+        ):
+            _merge_pipeline_filter(args, filter_graph)
 
     argv = [str(ffmpeg_executable), "-hide_banner", "-nostdin", "-y"]
     if progress:
@@ -389,7 +459,9 @@ def estimate_required_space(
         "compatibility": 1.5,
         "dvd": 1.5,
     }.get(profile, 2.0)
-    intermediate_multiplier = 1.0 if settings.ai_upscale and settings.ai_scale > 1 else 0.0
+    intermediate_multiplier = (
+        1.0 if settings.ai_upscale and settings.ai_scale > 1 else 0.0
+    )
     upscale_multiplier = (
         float(max(1, settings.ai_scale))
         if settings.ai_upscale and settings.ai_scale > 1
@@ -472,6 +544,7 @@ class RestoreJobRunner:
         self._reporter: ProgressReporter | None = None
         self._logger: logging.Logger | None = None
         self._work_dir: Path | None = None
+        self._backend_selection_reason: str | None = None
 
     @property
     def current_process(self) -> ManagedProcess | Any | None:
@@ -828,6 +901,15 @@ class RestoreJobRunner:
                 raise _JobCancelledSignal() from exc
             ffmpeg_input = "pipe:0"
             audio_source = plan.source
+        settings = plan.settings
+        ai_restore = (
+            stage == "restore"
+            and settings is not None
+            and settings.ai_upscale
+            and settings.ai_scale > 1
+            and settings.ai_backend != "none"
+        )
+        filter_set = "restore" if ai_restore else ("final" if stage == "encode" else "all")
         argv = build_ffmpeg_argv(
             plan,
             partial,
@@ -835,9 +917,10 @@ class RestoreJobRunner:
             audio_source=audio_source,
             encode_args=encode_args,
             ffmpeg_executable=self.ffmpeg_executable,
+            filter_set=filter_set,
         )
         if self._logger is not None:
-            self._logger.info("stage=%s argv=%r", stage, argv)
+            self._logger.info("stage=%s filter_set=%s argv=%r", stage, filter_set, argv)
 
         produced_empty = False
 
@@ -1062,29 +1145,82 @@ class RestoreJobRunner:
         partial.rename(artifact)
 
     def _select_backend(self, settings: RestoreSettings, input_path: Path) -> UpscaleBackend:
+        requested = str(settings.ai_backend).casefold()
+        self._backend_selection_reason = None
         if self.upscale_backend is not None:
-            return self.upscale_backend
-        if settings.ai_backend == "classical":
+            backend = self.upscale_backend
+            actual = str(getattr(backend, "name", type(backend).__name__)).casefold()
+            if requested not in {"", "none", actual}:
+                self._backend_selection_reason = "runner-provided backend override"
+            return backend
+
+        if requested == "classical":
             from vhs_restore.upscale.classical import ClassicalBackend
 
             candidate: UpscaleBackend = ClassicalBackend()
-            if candidate.is_available():
+            try:
+                available = candidate.is_available()
+            except Exception as exc:
+                available = False
+                self._backend_selection_reason = f"classical availability check failed: {exc}"
+            if available:
                 return candidate
-        elif settings.ai_backend == "realesrgan-ncnn-vulkan":
+            if self._backend_selection_reason is None:
+                self._backend_selection_reason = "classical backend is unavailable"
+        elif requested == "realesrgan-ncnn-vulkan":
             from vhs_restore.upscale.realesrgan import RealESRGANBackend
 
             candidate = RealESRGANBackend()
-            if candidate.is_available() and getattr(
-                candidate, "supports_input", lambda _: True
-            )(input_path):
+            try:
+                available = candidate.is_available()
+            except Exception as exc:
+                available = False
+                self._backend_selection_reason = f"Real-ESRGAN availability check failed: {exc}"
+            try:
+                supports = bool(candidate.supports_input(input_path))
+            except Exception as exc:
+                supports = False
+                self._backend_selection_reason = (
+                    f"Real-ESRGAN input compatibility check failed: {exc}"
+                )
+            if available and supports:
                 return candidate
-        elif settings.ai_backend == "video2x":
+            if self._backend_selection_reason is None:
+                self._backend_selection_reason = (
+                    "Real-ESRGAN backend is unavailable or does not support this input"
+                )
+        elif requested == "video2x":
             from vhs_restore.upscale.video2x import Video2XBackend
 
             candidate = Video2XBackend()
-            if candidate.is_available():
+            try:
+                available = candidate.is_available()
+            except Exception as exc:
+                available = False
+                self._backend_selection_reason = f"Video2X availability check failed: {exc}"
+            if available:
                 return candidate
-        return select_upscale_backend(input=input_path)
+            if self._backend_selection_reason is None:
+                self._backend_selection_reason = "Video2X backend is unavailable"
+
+        backend = select_upscale_backend(input=input_path)
+        actual = str(getattr(backend, "name", type(backend).__name__)).casefold()
+        if actual != requested and self._backend_selection_reason is None:
+            self._backend_selection_reason = "requested backend was unavailable"
+        return backend
+
+    def _backend_status_message(
+        self,
+        settings: RestoreSettings,
+        backend: UpscaleBackend,
+    ) -> str:
+        requested = str(settings.ai_backend)
+        actual = str(getattr(backend, "name", type(backend).__name__))
+        message = f"Requested: {requested} Actual: {actual}"
+        if requested.casefold() != actual.casefold():
+            reason = self._backend_selection_reason or "requested backend was unavailable"
+            message += f" Reason: {reason}"
+        return f"{message} AI scale: {settings.ai_scale}x"
 
     def run(
         self,
@@ -1180,6 +1316,40 @@ class RestoreJobRunner:
                 and settings.ai_scale > 1
                 and settings.ai_backend != "none"
             )
+            source_width = getattr(analysis, "width", None)
+            source_height = getattr(analysis, "height", None)
+            source_size = f"{source_width or '?'}x{source_height or '?'}"
+            source_rate = getattr(analysis, "frame_rate", None)
+            restore_resolution = source_size
+            if should_upscale and isinstance(source_width, int) and isinstance(source_height, int):
+                ai_resolution = (
+                    f"{source_width * settings.ai_scale}x"
+                    f"{source_height * settings.ai_scale}"
+                )
+            else:
+                ai_resolution = "not requested"
+            if (
+                str(getattr(settings, "target_resolution", "")).casefold() == "custom"
+                and getattr(settings, "target_width", None)
+                and getattr(settings, "target_height", None)
+            ):
+                final_resolution = (
+                    f"{settings.target_width}x{settings.target_height}"
+                )
+            else:
+                final_resolution = getattr(settings, "target_resolution", "unknown")
+            self._logger.info(
+                "job start requested_backend=%s actual_backend=%s ai_scale=%sx "
+                "source=%s rate=%s restore=%s ai=%s final=%s",
+                settings.ai_backend,
+                "pending" if should_upscale else "not requested",
+                settings.ai_scale,
+                source_size,
+                source_rate,
+                restore_resolution,
+                ai_resolution,
+                final_resolution,
+            )
 
             if not should_upscale:
                 cached_restore = self._cache_artifact(cache, manifest, "restore")
@@ -1226,6 +1396,10 @@ class RestoreJobRunner:
                     self._emit("restore", 1.0, "restore stage resumed", status="completed")
 
                 backend = self._select_backend(settings, restore_artifact)
+                backend_message = self._backend_status_message(settings, backend)
+                if self._logger is not None:
+                    self._logger.info("upscale backend %s", backend_message)
+                self._emit("upscale", 0.0, backend_message)
                 upscale_artifact = cache_root / "upscaled.mkv"
                 cached_upscale = self._cache_artifact(cache, manifest, "upscale")
                 if cached_upscale is None:

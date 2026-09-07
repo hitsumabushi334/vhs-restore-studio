@@ -31,13 +31,16 @@ from vhs_restore.gui.controller import RestoreController
 from vhs_restore.gui.diagnostics import DiagnosticsDialog, collect_dependency_report
 from vhs_restore.gui.preview import build_preview_request
 from vhs_restore.gui.settings import (
+    AI_SCALE_OPTIONS,
     DEINTERLACE_OPTIONS,
     OUTPUT_PROFILE_OPTIONS,
     PRESET_OPTIONS,
-    AdvancedSettingsDialog,
     STRONG_AI_WARNING,
+    TARGET_RESOLUTION_OPTIONS,
+    AdvancedSettingsDialog,
     add_options,
 )
+from vhs_restore.pipeline import build_pipeline, describe_processing_plan
 from vhs_restore.settings import RestoreSettings, load_preset, validate_settings
 from vhs_restore.utils.deps import DependencyReport
 
@@ -153,6 +156,14 @@ class MainWindow(QMainWindow):
         analysis_layout = QVBoxLayout(analysis_group)
         analysis_layout.addWidget(self.analysis_panel)
 
+        self.processing_plan = QPlainTextEdit(self)
+        self.processing_plan.setReadOnly(True)
+        self.processing_plan.setPlaceholderText("Processing plan appears here.")
+        self.processing_plan_text = self.processing_plan
+        processing_plan_group = QGroupBox("Processing plan", self)
+        processing_plan_layout = QVBoxLayout(processing_plan_group)
+        processing_plan_layout.addWidget(self.processing_plan)
+
         self.preset_combo = QComboBox(self)
         add_options(self.preset_combo, PRESET_OPTIONS)
         self.preset_description_label = QLabel(self)
@@ -162,9 +173,18 @@ class MainWindow(QMainWindow):
         add_options(self.deinterlace_combo, DEINTERLACE_OPTIONS)
         self.denoise_slider, self.denoise_value_label = self._make_strength_slider()
         self.chroma_slider, self.chroma_value_label = self._make_strength_slider()
+        self.artifact_slider, self.artifact_value_label = self._make_strength_slider()
+        self.sharpen_slider, self.sharpen_value_label = self._make_strength_slider()
         self.ai_upscale_check = QCheckBox("Enable AI upscale", self)
+        self.ai_scale_combo = QComboBox(self)
+        add_options(self.ai_scale_combo, AI_SCALE_OPTIONS)
+        self.target_resolution_combo = QComboBox(self)
+        add_options(self.target_resolution_combo, TARGET_RESOLUTION_OPTIONS)
         self.ai_status_label = QLabel("AI backend: checking…", self)
         self.ai_status_label.setWordWrap(True)
+        self.settings_warning_label = QLabel(self)
+        self.settings_warning_label.setWordWrap(True)
+        self.ai_warning_label = self.settings_warning_label
         self.output_profile_combo = QComboBox(self)
         add_options(self.output_profile_combo, OUTPUT_PROFILE_OPTIONS)
         self.advanced_button = QPushButton("Advanced…", self)
@@ -177,8 +197,15 @@ class MainWindow(QMainWindow):
         controls_form.addRow("", self.denoise_value_label)
         controls_form.addRow("Chroma repair", self.chroma_slider)
         controls_form.addRow("", self.chroma_value_label)
+        controls_form.addRow("Artifact removal", self.artifact_slider)
+        controls_form.addRow("", self.artifact_value_label)
+        controls_form.addRow("Final sharpen", self.sharpen_slider)
+        controls_form.addRow("", self.sharpen_value_label)
         controls_form.addRow("", self.ai_upscale_check)
+        controls_form.addRow("AI scale", self.ai_scale_combo)
+        controls_form.addRow("Target resolution", self.target_resolution_combo)
         controls_form.addRow("", self.ai_status_label)
+        controls_form.addRow("", self.settings_warning_label)
         controls_form.addRow("Output profile", self.output_profile_combo)
         controls_form.addRow("", self.advanced_button)
         controls_group = QGroupBox("Restore settings", self)
@@ -239,6 +266,7 @@ class MainWindow(QMainWindow):
         settings_layout = QVBoxLayout(settings_widget)
         settings_layout.addWidget(input_group)
         settings_layout.addWidget(analysis_group)
+        settings_layout.addWidget(processing_plan_group)
         settings_layout.addWidget(controls_group)
         settings_layout.addWidget(preview_group)
         settings_layout.addWidget(output_group)
@@ -293,11 +321,20 @@ class MainWindow(QMainWindow):
         self.analyze_button.clicked.connect(self._analyze_from_field)
         self.input_path_edit.path_dropped.connect(self._set_source_path)
         self.preset_combo.currentIndexChanged.connect(self._preset_index_changed)
-        self.denoise_slider.valueChanged.connect(
-            lambda value: self.denoise_value_label.setText(f"{value / 100:.2f}")
-        )
-        self.chroma_slider.valueChanged.connect(
-            lambda value: self.chroma_value_label.setText(f"{value / 100:.2f}")
+        for slider, label in (
+            (self.denoise_slider, self.denoise_value_label),
+            (self.chroma_slider, self.chroma_value_label),
+            (self.artifact_slider, self.artifact_value_label),
+            (self.sharpen_slider, self.sharpen_value_label),
+        ):
+            slider.valueChanged.connect(
+                lambda value, label=label: label.setText(f"{value / 100:.2f}")
+            )
+            slider.valueChanged.connect(self._settings_controls_changed)
+        self.ai_upscale_check.toggled.connect(self._settings_controls_changed)
+        self.ai_scale_combo.currentIndexChanged.connect(self._settings_controls_changed)
+        self.target_resolution_combo.currentIndexChanged.connect(
+            self._settings_controls_changed
         )
         self.preview_position_slider.valueChanged.connect(self._preview_position_changed)
         self.preview_15_button.clicked.connect(lambda: self.preview_position_slider.setValue(15))
@@ -310,6 +347,8 @@ class MainWindow(QMainWindow):
         self.browse_output_button.clicked.connect(self._browse_output)
         self.output_path_edit.textEdited.connect(self._output_path_edited)
         self.output_profile_combo.currentIndexChanged.connect(self._refresh_default_output_path)
+        self.output_profile_combo.currentIndexChanged.connect(self._sync_target_resolution_with_profile)
+        self.output_profile_combo.currentIndexChanged.connect(self._settings_controls_changed)
         self.diagnostics_button.clicked.connect(self._show_diagnostics)
 
         self.controller.analysis_started.connect(self._analysis_started)
@@ -340,9 +379,13 @@ class MainWindow(QMainWindow):
         self._set_combo_value(self.deinterlace_combo, settings.deinterlace)
         self.denoise_slider.setValue(round(settings.denoise_strength * 100))
         self.chroma_slider.setValue(round(settings.chroma_repair_strength * 100))
+        self.artifact_slider.setValue(round(settings.artifact_removal_strength * 100))
+        self.sharpen_slider.setValue(round(settings.sharpen_strength * 100))
+        self._set_combo_value(self.ai_scale_combo, settings.ai_scale)
+        self._set_combo_value(self.target_resolution_combo, settings.target_resolution)
         self.ai_upscale_check.setChecked(settings.ai_upscale)
         self._set_combo_value(self.output_profile_combo, settings.output_profile)
-        self._update_ai_enablement()
+        self._settings_controls_changed()
         self._preview_position_changed(self.preview_position_slider.value())
         self._refresh_default_output_path()
 
@@ -351,20 +394,61 @@ class MainWindow(QMainWindow):
         if key:
             self._apply_preset(str(key))
 
-    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+    def _set_combo_value(self, combo: QComboBox, value: object) -> None:
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _settings_from_controls(self) -> RestoreSettings:
         values = self._base_settings.to_dict()
+        output_profile = str(self.output_profile_combo.currentData())
+        target_resolution = (
+            "720x480"
+            if output_profile == "dvd"
+            else str(self.target_resolution_combo.currentData())
+        )
+        ai_scale = (
+            int(self.ai_scale_combo.currentData())
+            if self.ai_upscale_check.isChecked()
+            else 1
+        )
         values.update(
             deinterlace=str(self.deinterlace_combo.currentData()),
             denoise_strength=self.denoise_slider.value() / 100.0,
             chroma_repair_strength=self.chroma_slider.value() / 100.0,
+            artifact_removal_strength=self.artifact_slider.value() / 100.0,
+            sharpen_strength=self.sharpen_slider.value() / 100.0,
             ai_upscale=self.ai_upscale_check.isChecked(),
-            output_profile=str(self.output_profile_combo.currentData()),
+            ai_scale=ai_scale,
+            output_profile=output_profile,
+            target_resolution=target_resolution,
         )
         return RestoreSettings.from_mapping(values)
+
+    def _settings_controls_changed(self, *_args) -> None:
+        self._update_ai_enablement()
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
+
+    def _refresh_processing_plan(self) -> None:
+        if self._analysis is None:
+            self.processing_plan.setPlainText("Analyze a source to build the processing plan.")
+            return
+        try:
+            plan = build_pipeline(self._settings_from_controls(), self._analysis)
+            self.processing_plan.setPlainText(describe_processing_plan(plan))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self.processing_plan.setPlainText(f"Processing plan unavailable: {exc}")
+
+    def _refresh_settings_warnings(self) -> None:
+        settings = self._settings_from_controls()
+        messages: list[str] = []
+        if settings.ai_upscale and settings.ai_scale >= 4:
+            messages.append(STRONG_AI_WARNING)
+        elif settings.name.casefold().replace(" ", "_") == "strong_ai":
+            messages.append(STRONG_AI_WARNING)
+        messages.extend(warning.message for warning in validate_settings(settings, self._analysis))
+        self.settings_warning_label.setText("\n".join(messages))
+        self.settings_warning_label.setVisible(bool(messages))
 
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -381,6 +465,8 @@ class MainWindow(QMainWindow):
         self.input_path_edit.setText(str(path))
         self._analysis = None
         self.analysis_panel.setPlainText("Analyzing source…")
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         if self._using_default_output:
             self.output_path_edit.setText(
                 str(_default_output_path(path, self._settings_from_controls().output_profile))
@@ -404,12 +490,12 @@ class MainWindow(QMainWindow):
 
     def _analysis_started(self) -> None:
         self.stage_label.setText("Analyzing source…")
-        self.analyze_button.setEnabled(False)
-
     def _analysis_finished(self, info: SourceInfo) -> None:
         self._analysis = info
         self.analyze_button.setEnabled(True)
         self.analysis_panel.setPlainText(self._format_analysis(info))
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         warnings = validate_settings(self._settings_from_controls(), info)
         for warning in warnings:
             self._append_log(f"Warning: {warning.message}")
@@ -418,6 +504,8 @@ class MainWindow(QMainWindow):
     def _analysis_failed(self, message: str) -> None:
         self.analyze_button.setEnabled(True)
         self.analysis_panel.setPlainText(f"Analysis failed: {message}")
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         self._append_log(f"Analysis failed: {message}")
         self.stage_label.setText("Analysis failed")
 
@@ -461,6 +549,14 @@ class MainWindow(QMainWindow):
             f"{value}% ({_format_seconds(start)} / {_format_seconds(duration)})"
         )
 
+    def _sync_target_resolution_with_profile(self, *_args) -> None:
+        profile = str(self.output_profile_combo.currentData() or "")
+        if profile == "dvd":
+            self.target_resolution_combo.setEnabled(False)
+            self._set_combo_value(self.target_resolution_combo, "720x480")
+        else:
+            self.target_resolution_combo.setEnabled(True)
+
     def _refresh_default_output_path(self, *_args) -> None:
         if not self._using_default_output:
             return
@@ -493,6 +589,9 @@ class MainWindow(QMainWindow):
             return
 
         settings = self._settings_from_controls()
+        self._append_log(
+            f"Requested AI backend: {settings.ai_backend} (scale {settings.ai_scale}x)"
+        )
         warnings = validate_settings(settings, self._analysis)
         for warning in warnings:
             self._append_log(f"Warning: {warning.message}")
@@ -581,8 +680,13 @@ class MainWindow(QMainWindow):
         updated = dialog.get_settings()
         self._base_settings = updated
         self._set_combo_value(self.deinterlace_combo, updated.deinterlace)
+        self._set_combo_value(self.ai_scale_combo, updated.ai_scale)
+        self._set_combo_value(self.target_resolution_combo, updated.target_resolution)
         self._set_combo_value(self.output_profile_combo, updated.output_profile)
+        self.artifact_slider.setValue(round(updated.artifact_removal_strength * 100))
+        self.sharpen_slider.setValue(round(updated.sharpen_strength * 100))
         self.ai_upscale_check.setChecked(updated.ai_upscale)
+        self._settings_controls_changed()
         self._append_log("Advanced settings updated.")
 
     def _browse_output(self) -> None:

@@ -5,6 +5,7 @@ import pytest
 
 from vhs_restore.analysis.interlace import InterlaceAnalysis
 from vhs_restore.analysis.source_info import SourceInfo
+from vhs_restore.jobs.manifest import settings_hash
 from vhs_restore.settings import RestoreSettings, Warning, load_preset, validate_settings
 
 
@@ -13,38 +14,45 @@ def test_natural_preset_uses_fidelity_first_defaults():
 
     assert settings.name == "Natural"
     assert settings.deinterlace == "auto"
-    assert settings.qtgmc_preset == "balanced"
-    assert settings.denoise_strength == pytest.approx(0.15)
-    assert settings.chroma_repair_strength == pytest.approx(0.2)
+    assert settings.qtgmc_preset == "high"
+    assert settings.denoise_strength == pytest.approx(0.18)
+    assert settings.chroma_repair_strength == pytest.approx(0.28)
     assert settings.artifact_removal_strength == pytest.approx(0.1)
-    assert settings.sharpen_strength == pytest.approx(0.0)
+    assert settings.sharpen_strength == pytest.approx(0.05)
     assert settings.stabilization is False
     assert settings.ai_upscale is False
     assert settings.ai_backend == "none"
     assert settings.ai_model is None
     assert settings.ai_scale == 1
+    assert settings.target_resolution == "1440x1080"
+    assert settings.target_width is None
+    assert settings.target_height is None
+    assert settings.pipeline_version == 2
     assert settings.preserve_aspect is True
     assert settings.aspect_mode == "preserve_4_3"
     assert settings.output_profile == "archive_practical"
 
 
-def test_balanced_ai_preset_enables_conservative_vulkan_ai_defaults():
+def test_balanced_ai_preset_enables_video2x_ai_defaults():
     settings = load_preset("Balanced AI")
 
     assert settings.name == "Balanced AI"
     assert settings.deinterlace == "auto"
-    assert settings.qtgmc_preset == "balanced"
-    assert settings.denoise_strength == pytest.approx(0.2)
-    assert settings.chroma_repair_strength == pytest.approx(0.25)
+    assert settings.qtgmc_preset == "high"
+    assert settings.denoise_strength == pytest.approx(0.28)
+    assert settings.chroma_repair_strength == pytest.approx(0.45)
     assert settings.artifact_removal_strength == pytest.approx(0.15)
-    assert settings.sharpen_strength == pytest.approx(0.05)
+    assert settings.sharpen_strength == pytest.approx(0.08)
     assert settings.stabilization is False
     assert settings.ai_upscale is True
-    assert settings.ai_backend == "realesrgan-ncnn-vulkan"
+    assert settings.ai_backend == "video2x"
     assert settings.ai_model == "realesrgan-x4plus"
     assert settings.ai_scale == 2
+    assert settings.target_resolution == "1440x1080"
     assert settings.preserve_aspect is True
     assert settings.aspect_mode == "preserve_4_3"
+
+
 
 
 def test_load_preset_accepts_packaged_presets_and_rejects_unknown_names():
@@ -57,7 +65,7 @@ def test_load_preset_accepts_packaged_presets_and_rejects_unknown_names():
         load_preset("not-a-preset")
 
 
-def test_preset_files_have_the_complete_settings_schema():
+def test_preset_files_have_the_complete_settings_schema_and_match():
     root = Path(__file__).resolve().parents[1]
     required = {
         "name",
@@ -73,14 +81,74 @@ def test_preset_files_have_the_complete_settings_schema():
         "ai_backend",
         "ai_model",
         "ai_scale",
+        "target_resolution",
+        "target_width",
+        "target_height",
+        "pipeline_version",
         "preserve_aspect",
         "aspect_mode",
         "output_profile",
     }
 
-    for path in sorted((root / "presets").glob("*.json")):
-        assert required <= set(json.loads(path.read_text(encoding="utf-8")))
+    root_presets = root / "presets"
+    packaged_presets = root / "src" / "vhs_restore" / "assets" / "presets"
+    for path in sorted(root_presets.glob("*.json")):
+        values = json.loads(path.read_text(encoding="utf-8"))
+        assert required <= set(values)
+        assert values == json.loads(
+            (packaged_presets / path.name).read_text(encoding="utf-8")
+        )
 
+def test_from_mapping_accepts_legacy_mapping_and_infers_target_resolution():
+    values = load_preset("natural").to_dict()
+    values["output_profile"] = "dvd"
+    for field in ("target_resolution", "target_width", "target_height", "pipeline_version"):
+        values.pop(field)
+
+    settings = RestoreSettings.from_mapping(values)
+
+    assert settings.target_resolution == "720x480"
+    assert settings.target_width is None
+    assert settings.target_height is None
+    assert settings.pipeline_version == 2
+
+
+def test_from_mapping_rejects_invalid_target_resolution_and_custom_dimensions():
+    values = load_preset("natural").to_dict()
+
+    values["target_resolution"] = "1024x768"
+    with pytest.raises(ValueError, match="target_resolution"):
+        RestoreSettings.from_mapping(values)
+
+    values["target_resolution"] = "custom"
+    values["target_width"] = 0
+    values["target_height"] = 480
+    with pytest.raises(ValueError, match="target_width"):
+        RestoreSettings.from_mapping(values)
+
+
+def test_validate_settings_warns_when_dvd_output_will_downscale_ai():
+    settings = RestoreSettings(
+        ai_upscale=True,
+        ai_backend="video2x",
+        ai_model="realesrgan-x4plus",
+        ai_scale=2,
+        output_profile="dvd",
+        target_resolution="720x480",
+    )
+
+    warnings = validate_settings(settings, InterlaceAnalysis("Progressive", 1.0))
+
+    assert any(item.code == "dvd-ai" for item in warnings)
+
+
+def test_settings_hash_includes_pipeline_version():
+    values = load_preset("natural").to_dict()
+    version_one = {**values, "pipeline_version": 1}
+    version_two = {**values, "pipeline_version": 2}
+
+    assert set(version_one) == set(version_two)
+    assert settings_hash(version_one) != settings_hash(version_two)
 
 @pytest.mark.parametrize(
     "field",
