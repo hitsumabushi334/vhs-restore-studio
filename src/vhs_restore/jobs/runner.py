@@ -307,24 +307,27 @@ def build_ffmpeg_argv(
     start = _as_number(plan.start)
     duration = _as_number(plan.duration)
     pipe_input = str(input_value) == "pipe:0"
+    input_is_source = not pipe_input and _same_path(Path(input_value), plan.source)
+    audio_is_source = audio_value is not None and _same_path(audio_value, plan.source)
     filter_graph = plan.filter_graph if include_pipeline_filters else ""
-    if filter_graph:
+    if filter_graph and (input_is_source or pipe_input):
         _merge_pipeline_filter(args, filter_graph)
 
     argv = [str(ffmpeg_executable), "-hide_banner", "-nostdin", "-y"]
     if progress:
         argv.extend(("-progress", "pipe:1", "-nostats"))
-    if not pipe_input:
+    if input_is_source:
         if start is not None:
             argv.extend(("-ss", start))
         if duration is not None:
             argv.extend(("-t", duration))
     argv.extend(("-i", str(input_value)))
     if audio_value is not None:
-        if start is not None:
-            argv.extend(("-ss", start))
-        if duration is not None:
-            argv.extend(("-t", duration))
+        if audio_is_source:
+            if start is not None:
+                argv.extend(("-ss", start))
+            if duration is not None:
+                argv.extend(("-t", duration))
         argv.extend(("-i", str(audio_value)))
     argv.extend(args)
     if audio_value is not None:
@@ -410,6 +413,25 @@ def _default_job_id(source: Path, output: Path, source_digest: str, settings_dig
 
 def _same_path(left: Path, right: Path) -> bool:
     return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def _is_empty_media(path: Path) -> bool:
+    """Return True for zero-byte or header-only MP4/MKV stubs."""
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return True
+    if size == 0:
+        return True
+    if size >= 4096:
+        return False
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(64)
+    except OSError:
+        return True
+    return b"ftyp" in head or head.startswith(b"\x1aE\xdf\xa3")
 
 
 class RestoreJobRunner:
@@ -629,12 +651,16 @@ class RestoreJobRunner:
             settings_hash=manifest.settings_hash,
         )
         if cached is not None:
+            if _is_empty_media(cached):
+                return None
             return cached
         record = manifest.stages.get(stage, {})
         if manifest.stage_is_valid(stage):
             value = record.get("artifact_path")
             if value:
-                return Path(value)
+                artifact = Path(value)
+                if not _is_empty_media(artifact):
+                    return artifact
         return None
 
     def _record_cache(
@@ -778,6 +804,8 @@ class RestoreJobRunner:
     ) -> Path:
         self._check_cancel()
         artifact.parent.mkdir(parents=True, exist_ok=True)
+        if artifact.exists() and _is_empty_media(artifact):
+            artifact.unlink()
         partial = _partial_path(artifact)
         if partial.exists():
             partial.unlink()
@@ -811,13 +839,18 @@ class RestoreJobRunner:
         if self._logger is not None:
             self._logger.info("stage=%s argv=%r", stage, argv)
 
+        produced_empty = False
+
         def on_output(line: str) -> None:
+            nonlocal produced_empty
+            lowered = line.casefold()
+            if "nothing was encoded" in lowered or "output file is empty" in lowered:
+                produced_empty = True
             if self._logger is not None:
                 self._logger.info("stage=%s %s", stage, line)
             progress = self._parse_progress(line, duration)
             if progress is not None:
                 self._emit(stage, progress, line)
-
         self._emit(stage, 0.0, f"{stage} started")
         ffmpeg_stdin = getattr(qtgmc_process, "stdout", None)
         try:
@@ -921,6 +954,11 @@ class RestoreJobRunner:
             )
         if not partial.exists():
             raise JobError(f"{stage} completed without creating {partial}")
+        if produced_empty or _is_empty_media(partial):
+            raise JobError(
+                f"{stage} produced an empty media file; "
+                "preview seek must not be applied to already-trimmed intermediates"
+            )
         self._promote(partial, artifact)
         manifest.mark_stage(stage, status="completed", artifact=artifact)
         save_manifest(manifest, manifest_file)
@@ -1017,6 +1055,8 @@ class RestoreJobRunner:
     def _promote(partial: Path, artifact: Path) -> None:
         if not partial.exists():
             raise FileNotFoundError(f"incomplete artifact does not exist: {partial}")
+        if artifact.exists() and _is_empty_media(artifact):
+            artifact.unlink()
         if artifact.exists():
             raise FileExistsError(f"refusing to overwrite existing artifact: {artifact}")
         partial.rename(artifact)
