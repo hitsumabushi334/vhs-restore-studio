@@ -2,11 +2,11 @@
   "name": "Natural",
   "description": "Fidelity-first restoration with conservative processing.",
   "deinterlace": "auto",
-  "qtgmc_preset": "balanced",
-  "denoise_strength": 0.15,
-  "chroma_repair_strength": 0.2,
+  "qtgmc_preset": "high",
+  "denoise_strength": 0.18,
+  "chroma_repair_strength": 0.28,
   "artifact_removal_strength": 0.1,
-  "sharpen_strength": 0.0,
+  "sharpen_strength": 0.05,
   "stabilization": false,
   "ai_upscale": false,
   "ai_backend": "none",
@@ -14,5 +14,9 @@
   "ai_scale": 1,
   "preserve_aspect": true,
   "aspect_mode": "preserve_4_3",
-  "output_profile": "archive_practical"
+  "output_profile": "archive_practical",
+  "target_resolution": "1440x1080",
+  "target_width": null,
+  "target_height": null,
+  "pipeline_version": 2
 }

@@ -64,10 +64,14 @@ the GUI unusable.
 
 ## Safety and processing defaults
 
+- Processing order is **Analyze → Restore at native resolution → optional AI
+  upscale → Final geometry/aspect → Encode**. Restore does not pre-scale to
+  1440x1080 before Video2X.
 - Source media is never overwritten; completed and partial outputs use
   separate paths.
-- 4:3 source material is preserved. Archive output is scaled to 1440x1080
-  (4:3), while DVD output remains 720x480; neither is stretched to 16:9.
+- 4:3 source material is preserved. In the post-AI (or AI-off) final geometry
+  stage, archive output is scaled to 1440x1080 (4:3), while DVD output remains
+  720x480; neither is stretched to 16:9.
 - Japanese characters, spaces, parentheses, and brackets in paths are
   supported.
 - Preview and full restoration use one shared pipeline builder.

@@ -641,3 +641,118 @@ def test_ffmpeg_wait_keyboardinterrupt_is_not_wrapped_as_job_error(
             manifest_file=work_dir / "manifest.json",
             duration=5.0,
         )
+
+
+
+def test_ffmpeg_wait_error_collects_vspipe_stderr_arriving_only_after_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "interlaced.avi"
+    source.write_bytes(b"source")
+    artifact = tmp_path / "restored.mkv"
+    analysis = SourceInfo(path=source, duration=20.0, width=720, height=480)
+    plan = _qtgmc_plan(source, analysis)
+    runner = RestoreJobRunner()
+    work_dir = tmp_path / "job"
+    work_dir.mkdir()
+    runner._work_dir = work_dir
+    manifest = runner_module.JobManifest(source, artifact, RestoreSettings())
+
+    class DelayedStderrProducer:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdout = None
+            self.stderr = None
+            self.kill_calls = 0
+            self.wait_calls = 0
+            self._qtgmc_stderr: list[bytes] = []
+            self._qtgmc_stderr_thread = self
+
+        def is_alive(self) -> bool:
+            return self.returncode is None
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+        def wait(self, timeout: float | None = None):
+            self.wait_calls += 1
+            if self.kill_calls == 0:
+                raise AssertionError("stderr is published only after kill")
+            self._qtgmc_stderr.append(b"Script evaluation failed: after termination\n")
+            self.returncode = 1
+            return CompletedProcess(["vspipe"], 1, "", "after termination")
+
+    producer = DelayedStderrProducer()
+    monkeypatch.setattr(runner, "_run_qtgmc_stage", lambda **kwargs: producer)
+    monkeypatch.setattr(
+        runner_module._ProcessGroup,
+        "wait",
+        lambda self, timeout=None: (_ for _ in ()).throw(RuntimeError("ffmpeg wait exploded")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_start_command",
+        lambda *args, **kwargs: type(
+            "Proc",
+            (),
+            {"returncode": None, "stdout": None, "kill": lambda self=None: None},
+        )(),
+    )
+
+    with pytest.raises(JobError, match="after termination") as raised:
+        runner._run_ffmpeg_stage(
+            stage="deinterlace",
+            plan=plan,
+            input_path=source,
+            artifact=artifact,
+            encode_args=(),
+            manifest=manifest,
+            manifest_file=work_dir / "manifest.json",
+            duration=5.0,
+        )
+
+    assert "ffmpeg wait exploded" in str(raised.value)
+    assert producer.kill_calls == 1
+    assert producer.wait_calls >= 1
+
+
+
+def test_wait_process_exit_force_kills_after_wait_timeout():
+    class Raw:
+        def __init__(self) -> None:
+            self.kills = 0
+
+        def kill(self) -> None:
+            self.kills += 1
+
+    class Proc:
+        def __init__(self) -> None:
+            self.waits = 0
+            self.kills = 0
+            self._process = Raw()
+
+        def kill(self) -> None:
+            self.kills += 1
+
+        def wait(self, timeout: float | None = None):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("vspipe", timeout or 0)
+            return CompletedProcess(["vspipe"], 1)
+
+    producer = Proc()
+    runner_module._wait_process_exit(producer, timeout=0.1)
+    assert producer.waits == 2
+    assert producer.kills + producer._process.kills >= 1
+
+
+def test_wait_process_exit_does_not_swallow_keyboardinterrupt():
+    class Proc:
+        def wait(self, timeout: float | None = None):
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_module._wait_process_exit(Proc(), timeout=0.1)

@@ -128,3 +128,24 @@ def test_pipeline_preserves_4_3_without_a_16_9_stretch():
     assert plan.preserve_aspect is True
     assert "16:9" not in plan.filter_graph
     assert "setdar=4/3" in plan.filter_graph
+ 
+def test_ai_restore_filters_do_not_pre_resize_to_archive_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        pipeline,
+        "detect_dependencies",
+        lambda: SimpleNamespace(qtgmc_available=False),
+    )
+    settings = RestoreSettings(
+        ai_upscale=True,
+        ai_backend="video2x",
+        ai_model="realesrgan-x4plus",
+        ai_scale=2,
+        target_resolution="1440x1080",
+    )
+
+    plan = build_pipeline(settings, _interlaced_source())
+
+    assert all("scale=1440:1080" not in expression for expression in plan.restore_filters)
+    assert all(not expression.startswith("pad=") for expression in plan.restore_filters)

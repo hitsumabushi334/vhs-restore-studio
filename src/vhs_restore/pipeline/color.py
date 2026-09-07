@@ -1,34 +1,23 @@
-"""Aspect-safe color and sizing stage construction."""
+"""Compatibility wrapper for the final geometry stage."""
 
 from __future__ import annotations
 
 from vhs_restore.settings import RestoreSettings
 
-
-def _scaled_and_padded(width: int, height: int) -> tuple[str, str]:
-    scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
-    pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
-    return scale, pad
+from .geometry import build_geometry_filters
 
 
-def build_color_filters(settings: RestoreSettings) -> tuple[str, ...]:
-    """Return color/aspect filters that never stretch 4:3 content to 16:9."""
+def build_color_filters(
+    settings: RestoreSettings,
+    analysis: object | None = None,
+) -> tuple[str, ...]:
+    """Return the aspect-safe final geometry filters.
 
-    if settings.aspect_mode == "pillarbox_16_9":
-        scale, _ = _scaled_and_padded(1440, 1080)
-        return (
-            scale,
-            "setsar=1",
-            "setdar=4/3",
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
-        )
+    ``analysis`` is optional for compatibility with older callers; all
+    non-native output modes resolve their dimensions without it.
+    """
 
-    if settings.output_profile == "dvd":
-        scale, pad = _scaled_and_padded(720, 480)
-        return (scale, pad, "setsar=8/9", "setdar=4/3")
-
-    scale, pad = _scaled_and_padded(1440, 1080)
-    return (scale, pad, "setsar=1", "setdar=4/3")
+    return build_geometry_filters(settings, analysis)
 
 
 build_color_stage = build_color_filters

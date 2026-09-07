@@ -56,11 +56,13 @@ def test_archive_practical_uses_high_quality_h264_and_aac():
         _settings("archive_practical"),
     )
 
+    assert _option(args, "-f") == "mp4"
     assert _option(args, "-c:v") == "libx264"
     assert _option(args, "-preset") == "slow"
     assert _option(args, "-crf") == "16"
     assert _option(args, "-c:a") == "aac"
     assert _option(args, "-pix_fmt") == "yuv420p"
+    assert _option(args, "-movflags") == "+faststart"
 
 
 def test_compatibility_uses_mp4_h264_aac_and_faststart():
@@ -73,6 +75,7 @@ def test_compatibility_uses_mp4_h264_aac_and_faststart():
     assert _option(args, "-f") == "mp4"
     assert _option(args, "-c:v") == "libx264"
     assert _option(args, "-profile:v") == "high"
+    assert "-level" not in args
     assert _option(args, "-c:a") == "aac"
     assert _option(args, "-movflags") == "+faststart"
 
@@ -209,3 +212,33 @@ def test_dvd_rejects_missing_duration_needed_for_bitrate_planning():
 def test_unknown_encode_profile_is_rejected():
     with pytest.raises(ValueError, match="profile"):
         build_encode_args("webm", _analysis(), _settings("webm"))
+
+
+from vhs_restore.pipeline.encode import align_encode_container_with_output
+
+
+def test_align_encode_container_uses_matroska_for_mkv_h264_outputs():
+    args = build_encode_args(
+        "archive_practical",
+        _analysis(),
+        _settings("archive_practical"),
+    )
+
+    aligned = align_encode_container_with_output(args, Path("restored.mkv"))
+
+    assert _option(aligned, "-f") == "matroska"
+    assert "-movflags" not in aligned
+    assert _option(aligned, "-pix_fmt") == "yuv420p"
+
+
+def test_align_encode_container_keeps_mp4_faststart_for_mp4_outputs():
+    args = build_encode_args(
+        "archive_practical",
+        _analysis(),
+        _settings("archive_practical"),
+    )
+
+    aligned = align_encode_container_with_output(args, Path("restored.mp4"))
+
+    assert _option(aligned, "-f") == "mp4"
+    assert _option(aligned, "-movflags") == "+faststart"

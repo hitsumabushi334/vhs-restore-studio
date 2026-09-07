@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
-    QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -30,13 +31,16 @@ from vhs_restore.gui.controller import RestoreController
 from vhs_restore.gui.diagnostics import DiagnosticsDialog, collect_dependency_report
 from vhs_restore.gui.preview import build_preview_request
 from vhs_restore.gui.settings import (
+    AI_SCALE_OPTIONS,
     DEINTERLACE_OPTIONS,
     OUTPUT_PROFILE_OPTIONS,
     PRESET_OPTIONS,
-    AdvancedSettingsDialog,
     STRONG_AI_WARNING,
+    TARGET_RESOLUTION_OPTIONS,
+    AdvancedSettingsDialog,
     add_options,
 )
+from vhs_restore.pipeline import build_pipeline, describe_processing_plan
 from vhs_restore.settings import RestoreSettings, load_preset, validate_settings
 from vhs_restore.utils.deps import DependencyReport
 
@@ -72,10 +76,22 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _default_output_path(source: Path | None = None) -> Path:
-    name = "restored.mkv"
+def _playable_output_extension(profile: str | None) -> str:
+    """Return a Windows-friendly default suffix for the encode profile."""
+
+    if profile in {"compatibility", "archive_practical"}:
+        return ".mp4"
+    return ".mkv"
+
+
+def _default_output_path(
+    source: Path | None = None,
+    profile: str | None = None,
+) -> Path:
+    extension = _playable_output_extension(profile)
+    name = f"restored{extension}"
     if source is not None and source.stem:
-        name = f"{source.stem}_restored.mkv"
+        name = f"{source.stem}_restored{extension}"
     return _project_root() / "output" / name
 
 
@@ -102,7 +118,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("VHS Restore Studio")
-        self.resize(960, 760)
         self.setAcceptDrops(False)
 
         self.controller = controller or RestoreController(parent=self)
@@ -112,6 +127,7 @@ class MainWindow(QMainWindow):
         self._using_default_output = True
 
         self._build_ui()
+        self._size_to_available_screen()
         self._connect_signals()
         self._apply_preset("natural")
         self._set_running(False)
@@ -135,10 +151,18 @@ class MainWindow(QMainWindow):
         self.analysis_panel = QPlainTextEdit(self)
         self.analysis_panel.setReadOnly(True)
         self.analysis_panel.setPlaceholderText("Source analysis appears here.")
-        self.analysis_panel.setMinimumHeight(110)
+        self.analysis_panel.setMinimumHeight(64)
         analysis_group = QGroupBox("Source analysis", self)
         analysis_layout = QVBoxLayout(analysis_group)
         analysis_layout.addWidget(self.analysis_panel)
+
+        self.processing_plan = QPlainTextEdit(self)
+        self.processing_plan.setReadOnly(True)
+        self.processing_plan.setPlaceholderText("Processing plan appears here.")
+        self.processing_plan_text = self.processing_plan
+        processing_plan_group = QGroupBox("Processing plan", self)
+        processing_plan_layout = QVBoxLayout(processing_plan_group)
+        processing_plan_layout.addWidget(self.processing_plan)
 
         self.preset_combo = QComboBox(self)
         add_options(self.preset_combo, PRESET_OPTIONS)
@@ -149,9 +173,18 @@ class MainWindow(QMainWindow):
         add_options(self.deinterlace_combo, DEINTERLACE_OPTIONS)
         self.denoise_slider, self.denoise_value_label = self._make_strength_slider()
         self.chroma_slider, self.chroma_value_label = self._make_strength_slider()
+        self.artifact_slider, self.artifact_value_label = self._make_strength_slider()
+        self.sharpen_slider, self.sharpen_value_label = self._make_strength_slider()
         self.ai_upscale_check = QCheckBox("Enable AI upscale", self)
+        self.ai_scale_combo = QComboBox(self)
+        add_options(self.ai_scale_combo, AI_SCALE_OPTIONS)
+        self.target_resolution_combo = QComboBox(self)
+        add_options(self.target_resolution_combo, TARGET_RESOLUTION_OPTIONS)
         self.ai_status_label = QLabel("AI backend: checking…", self)
         self.ai_status_label.setWordWrap(True)
+        self.settings_warning_label = QLabel(self)
+        self.settings_warning_label.setWordWrap(True)
+        self.ai_warning_label = self.settings_warning_label
         self.output_profile_combo = QComboBox(self)
         add_options(self.output_profile_combo, OUTPUT_PROFILE_OPTIONS)
         self.advanced_button = QPushButton("Advanced…", self)
@@ -164,8 +197,15 @@ class MainWindow(QMainWindow):
         controls_form.addRow("", self.denoise_value_label)
         controls_form.addRow("Chroma repair", self.chroma_slider)
         controls_form.addRow("", self.chroma_value_label)
+        controls_form.addRow("Artifact removal", self.artifact_slider)
+        controls_form.addRow("", self.artifact_value_label)
+        controls_form.addRow("Final sharpen", self.sharpen_slider)
+        controls_form.addRow("", self.sharpen_value_label)
         controls_form.addRow("", self.ai_upscale_check)
+        controls_form.addRow("AI scale", self.ai_scale_combo)
+        controls_form.addRow("Target resolution", self.target_resolution_combo)
         controls_form.addRow("", self.ai_status_label)
+        controls_form.addRow("", self.settings_warning_label)
         controls_form.addRow("Output profile", self.output_profile_combo)
         controls_form.addRow("", self.advanced_button)
         controls_group = QGroupBox("Restore settings", self)
@@ -214,24 +254,60 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.log_area = QPlainTextEdit(self)
         self.log_area.setReadOnly(True)
-        self.log_area.setMinimumHeight(120)
+        self.log_area.setMinimumHeight(80)
 
         progress_group = QGroupBox("Progress and log", self)
         progress_layout = QVBoxLayout(progress_group)
         progress_layout.addWidget(self.stage_label)
         progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(self.log_area)
+        progress_layout.addWidget(self.log_area, 1)
+
+        settings_widget = QWidget(self)
+        settings_layout = QVBoxLayout(settings_widget)
+        settings_layout.addWidget(input_group)
+        settings_layout.addWidget(analysis_group)
+        settings_layout.addWidget(processing_plan_group)
+        settings_layout.addWidget(controls_group)
+        settings_layout.addWidget(preview_group)
+        settings_layout.addWidget(output_group)
+        settings_layout.addLayout(action_row)
+        settings_layout.addStretch(1)
+
+        settings_scroll = QScrollArea(self)
+        settings_scroll.setObjectName("settings_scroll")
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setWidget(settings_widget)
+
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.setObjectName("main_splitter")
+        splitter.addWidget(settings_scroll)
+        splitter.addWidget(progress_group)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         root = QWidget(self)
         root_layout = QVBoxLayout(root)
-        root_layout.addWidget(input_group)
-        root_layout.addWidget(analysis_group)
-        root_layout.addWidget(controls_group)
-        root_layout.addWidget(preview_group)
-        root_layout.addWidget(output_group)
-        root_layout.addLayout(action_row)
-        root_layout.addWidget(progress_group, 1)
+        root_layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
+
+    def _size_to_available_screen(self) -> None:
+        screen = self.screen()
+        if screen is None:
+            self.resize(960, 640)
+            return
+
+        available = screen.availableGeometry()
+        margin = 24
+        width = min(880, max(720, available.width() - 2 * margin))
+        height = min(620, max(520, available.height() - 2 * margin))
+        width = min(width, max(1, available.width() - 2 * margin))
+        height = min(height, max(1, available.height() - 2 * margin))
+        self.setGeometry(
+            available.x() + margin,
+            available.y() + margin,
+            width,
+            height,
+        )
 
     @staticmethod
     def _make_strength_slider() -> tuple[QSlider, QLabel]:
@@ -245,11 +321,20 @@ class MainWindow(QMainWindow):
         self.analyze_button.clicked.connect(self._analyze_from_field)
         self.input_path_edit.path_dropped.connect(self._set_source_path)
         self.preset_combo.currentIndexChanged.connect(self._preset_index_changed)
-        self.denoise_slider.valueChanged.connect(
-            lambda value: self.denoise_value_label.setText(f"{value / 100:.2f}")
-        )
-        self.chroma_slider.valueChanged.connect(
-            lambda value: self.chroma_value_label.setText(f"{value / 100:.2f}")
+        for slider, label in (
+            (self.denoise_slider, self.denoise_value_label),
+            (self.chroma_slider, self.chroma_value_label),
+            (self.artifact_slider, self.artifact_value_label),
+            (self.sharpen_slider, self.sharpen_value_label),
+        ):
+            slider.valueChanged.connect(
+                lambda value, label=label: label.setText(f"{value / 100:.2f}")
+            )
+            slider.valueChanged.connect(self._settings_controls_changed)
+        self.ai_upscale_check.toggled.connect(self._settings_controls_changed)
+        self.ai_scale_combo.currentIndexChanged.connect(self._settings_controls_changed)
+        self.target_resolution_combo.currentIndexChanged.connect(
+            self._settings_controls_changed
         )
         self.preview_position_slider.valueChanged.connect(self._preview_position_changed)
         self.preview_15_button.clicked.connect(lambda: self.preview_position_slider.setValue(15))
@@ -261,6 +346,9 @@ class MainWindow(QMainWindow):
         self.advanced_button.clicked.connect(self._open_advanced_settings)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.output_path_edit.textEdited.connect(self._output_path_edited)
+        self.output_profile_combo.currentIndexChanged.connect(self._refresh_default_output_path)
+        self.output_profile_combo.currentIndexChanged.connect(self._sync_target_resolution_with_profile)
+        self.output_profile_combo.currentIndexChanged.connect(self._settings_controls_changed)
         self.diagnostics_button.clicked.connect(self._show_diagnostics)
 
         self.controller.analysis_started.connect(self._analysis_started)
@@ -291,30 +379,76 @@ class MainWindow(QMainWindow):
         self._set_combo_value(self.deinterlace_combo, settings.deinterlace)
         self.denoise_slider.setValue(round(settings.denoise_strength * 100))
         self.chroma_slider.setValue(round(settings.chroma_repair_strength * 100))
+        self.artifact_slider.setValue(round(settings.artifact_removal_strength * 100))
+        self.sharpen_slider.setValue(round(settings.sharpen_strength * 100))
+        self._set_combo_value(self.ai_scale_combo, settings.ai_scale)
+        self._set_combo_value(self.target_resolution_combo, settings.target_resolution)
         self.ai_upscale_check.setChecked(settings.ai_upscale)
         self._set_combo_value(self.output_profile_combo, settings.output_profile)
-        self._update_ai_enablement()
+        self._settings_controls_changed()
         self._preview_position_changed(self.preview_position_slider.value())
+        self._refresh_default_output_path()
 
     def _preset_index_changed(self, index: int) -> None:
         key = self.preset_combo.itemData(index)
         if key:
             self._apply_preset(str(key))
 
-    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+    def _set_combo_value(self, combo: QComboBox, value: object) -> None:
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _settings_from_controls(self) -> RestoreSettings:
         values = self._base_settings.to_dict()
+        output_profile = str(self.output_profile_combo.currentData())
+        target_resolution = (
+            "720x480"
+            if output_profile == "dvd"
+            else str(self.target_resolution_combo.currentData())
+        )
+        ai_scale = (
+            int(self.ai_scale_combo.currentData())
+            if self.ai_upscale_check.isChecked()
+            else 1
+        )
         values.update(
             deinterlace=str(self.deinterlace_combo.currentData()),
             denoise_strength=self.denoise_slider.value() / 100.0,
             chroma_repair_strength=self.chroma_slider.value() / 100.0,
+            artifact_removal_strength=self.artifact_slider.value() / 100.0,
+            sharpen_strength=self.sharpen_slider.value() / 100.0,
             ai_upscale=self.ai_upscale_check.isChecked(),
-            output_profile=str(self.output_profile_combo.currentData()),
+            ai_scale=ai_scale,
+            output_profile=output_profile,
+            target_resolution=target_resolution,
         )
         return RestoreSettings.from_mapping(values)
+
+    def _settings_controls_changed(self, *_args) -> None:
+        self._update_ai_enablement()
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
+
+    def _refresh_processing_plan(self) -> None:
+        if self._analysis is None:
+            self.processing_plan.setPlainText("Analyze a source to build the processing plan.")
+            return
+        try:
+            plan = build_pipeline(self._settings_from_controls(), self._analysis)
+            self.processing_plan.setPlainText(describe_processing_plan(plan))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self.processing_plan.setPlainText(f"Processing plan unavailable: {exc}")
+
+    def _refresh_settings_warnings(self) -> None:
+        settings = self._settings_from_controls()
+        messages: list[str] = []
+        if settings.ai_upscale and settings.ai_scale >= 4:
+            messages.append(STRONG_AI_WARNING)
+        elif settings.name.casefold().replace(" ", "_") == "strong_ai":
+            messages.append(STRONG_AI_WARNING)
+        messages.extend(warning.message for warning in validate_settings(settings, self._analysis))
+        self.settings_warning_label.setText("\n".join(messages))
+        self.settings_warning_label.setVisible(bool(messages))
 
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -331,8 +465,12 @@ class MainWindow(QMainWindow):
         self.input_path_edit.setText(str(path))
         self._analysis = None
         self.analysis_panel.setPlainText("Analyzing source…")
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         if self._using_default_output:
-            self.output_path_edit.setText(str(_default_output_path(path)))
+            self.output_path_edit.setText(
+                str(_default_output_path(path, self._settings_from_controls().output_profile))
+            )
         self._analyze_path(path)
 
     def _analyze_from_field(self) -> None:
@@ -352,12 +490,12 @@ class MainWindow(QMainWindow):
 
     def _analysis_started(self) -> None:
         self.stage_label.setText("Analyzing source…")
-        self.analyze_button.setEnabled(False)
-
     def _analysis_finished(self, info: SourceInfo) -> None:
         self._analysis = info
         self.analyze_button.setEnabled(True)
         self.analysis_panel.setPlainText(self._format_analysis(info))
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         warnings = validate_settings(self._settings_from_controls(), info)
         for warning in warnings:
             self._append_log(f"Warning: {warning.message}")
@@ -366,6 +504,8 @@ class MainWindow(QMainWindow):
     def _analysis_failed(self, message: str) -> None:
         self.analyze_button.setEnabled(True)
         self.analysis_panel.setPlainText(f"Analysis failed: {message}")
+        self._refresh_processing_plan()
+        self._refresh_settings_warnings()
         self._append_log(f"Analysis failed: {message}")
         self.stage_label.setText("Analysis failed")
 
@@ -409,11 +549,30 @@ class MainWindow(QMainWindow):
             f"{value}% ({_format_seconds(start)} / {_format_seconds(duration)})"
         )
 
+    def _sync_target_resolution_with_profile(self, *_args) -> None:
+        profile = str(self.output_profile_combo.currentData() or "")
+        if profile == "dvd":
+            self.target_resolution_combo.setEnabled(False)
+            self._set_combo_value(self.target_resolution_combo, "720x480")
+        else:
+            self.target_resolution_combo.setEnabled(True)
+
+    def _refresh_default_output_path(self, *_args) -> None:
+        if not self._using_default_output:
+            return
+        source_text = self.input_path_edit.text().strip()
+        source = Path(source_text).expanduser() if source_text else None
+        profile = str(self.output_profile_combo.currentData() or "")
+        self.output_path_edit.setText(str(_default_output_path(source, profile)))
+
     def _resolve_output_path(self, source: Path) -> Path:
         value = self.output_path_edit.text().strip()
-        path = Path(value).expanduser() if value else _default_output_path(source)
+        profile = self._settings_from_controls().output_profile
+        path = Path(value).expanduser() if value else _default_output_path(source, profile)
         if path.exists() and path.is_dir():
-            path = path / f"{source.stem}_restored.mkv"
+            path = path / f"{source.stem}_restored{_playable_output_extension(profile)}"
+        if _playable_output_extension(profile) == ".mp4" and path.suffix.casefold() != ".mp4":
+            path = path.with_suffix(".mp4")
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -430,6 +589,9 @@ class MainWindow(QMainWindow):
             return
 
         settings = self._settings_from_controls()
+        self._append_log(
+            f"Requested AI backend: {settings.ai_backend} (scale {settings.ai_scale}x)"
+        )
         warnings = validate_settings(settings, self._analysis)
         for warning in warnings:
             self._append_log(f"Warning: {warning.message}")
@@ -518,15 +680,25 @@ class MainWindow(QMainWindow):
         updated = dialog.get_settings()
         self._base_settings = updated
         self._set_combo_value(self.deinterlace_combo, updated.deinterlace)
+        self._set_combo_value(self.ai_scale_combo, updated.ai_scale)
+        self._set_combo_value(self.target_resolution_combo, updated.target_resolution)
         self._set_combo_value(self.output_profile_combo, updated.output_profile)
+        self.artifact_slider.setValue(round(updated.artifact_removal_strength * 100))
+        self.sharpen_slider.setValue(round(updated.sharpen_strength * 100))
         self.ai_upscale_check.setChecked(updated.ai_upscale)
+        self._settings_controls_changed()
         self._append_log("Advanced settings updated.")
 
     def _browse_output(self) -> None:
+        profile = self._settings_from_controls().output_profile
+        default_path = str(
+            self.output_path_edit.text().strip()
+            or _default_output_path(profile=profile)
+        )
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Choose output file",
-            self.output_path_edit.text() or str(_default_output_path()),
+            default_path,
             "Video files (*.mkv *.mp4 *.mov);;All files (*.*)",
         )
         if path:

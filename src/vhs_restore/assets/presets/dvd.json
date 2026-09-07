@@ -14,5 +14,9 @@
   "ai_scale": 1,
   "preserve_aspect": true,
   "aspect_mode": "preserve_4_3",
-  "output_profile": "dvd"
+  "output_profile": "dvd",
+  "target_resolution": "720x480",
+  "target_width": null,
+  "target_height": null,
+  "pipeline_version": 2
 }

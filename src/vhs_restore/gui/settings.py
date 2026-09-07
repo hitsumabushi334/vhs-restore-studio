@@ -24,6 +24,7 @@ PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Archive", "archive"),
 )
 
+
 DEINTERLACE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Auto", "auto"),
     ("Off / progressive", "off"),
@@ -32,12 +33,14 @@ DEINTERLACE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Progressive", "progressive"),
 )
 
+
 QTGMC_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Fast", "fast"),
     ("Balanced", "balanced"),
     ("High", "high"),
     ("Very High", "very_high"),
 )
+
 
 AI_BACKEND_OPTIONS: tuple[tuple[str, str], ...] = (
     ("None", "none"),
@@ -46,6 +49,23 @@ AI_BACKEND_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Video2X Vulkan", "video2x"),
 )
 
+
+AI_SCALE_OPTIONS: tuple[tuple[str, int], ...] = (
+    ("2x", 2),
+    ("4x", 4),
+)
+
+
+TARGET_RESOLUTION_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Native", "native"),
+    ("720x480", "720x480"),
+    ("960x720", "960x720"),
+    ("1280x960", "1280x960"),
+    ("1440x1080", "1440x1080"),
+    ("1920x1080 pillarbox", "1920x1080"),
+)
+
+
 OUTPUT_PROFILE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Archive HQ", "archive_hq"),
     ("Archive Practical", "archive_practical"),
@@ -53,20 +73,23 @@ OUTPUT_PROFILE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("DVD", "dvd"),
 )
 
+
 STRONG_AI_WARNING = (
     "Strong AI は細部や日本語テキストを改変（幻覚）する可能性があります。"
     "プレビューで必ず確認してください。"
 )
 
 
-def add_options(combo: QComboBox, options: Iterable[tuple[str, str]]) -> None:
+
+
+def add_options(combo: QComboBox, options: Iterable[tuple[str, object]]) -> None:
     """Populate a combo box with display labels and stable setting values."""
 
     for label, value in options:
         combo.addItem(label, value)
 
 
-def _set_combo_value(combo: QComboBox, value: str) -> None:
+def _set_combo_value(combo: QComboBox, value: object) -> None:
     index = combo.findData(value)
     combo.setCurrentIndex(index if index >= 0 else 0)
 
@@ -139,6 +162,7 @@ SettingsDialog = AdvancedSettingsDialog
 
 __all__ = [
     "AI_BACKEND_OPTIONS",
+    "AI_SCALE_OPTIONS",
     "AdvancedSettingsDialog",
     "DEINTERLACE_OPTIONS",
     "OUTPUT_PROFILE_OPTIONS",
@@ -146,5 +170,6 @@ __all__ = [
     "QTGMC_OPTIONS",
     "STRONG_AI_WARNING",
     "SettingsDialog",
+    "TARGET_RESOLUTION_OPTIONS",
     "add_options",
 ]
