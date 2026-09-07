@@ -64,7 +64,9 @@ def test_compatibility_default_output_uses_mp4_suffix(tmp_path):
 
     assert _default_output_path(Path("capture.avi"), "compatibility").suffix == ".mp4"
     assert _default_output_path(Path("capture.avi"), "archive_practical").suffix == ".mp4"
-    assert _default_output_path(Path("capture.avi"), "archive_hq").suffix == ".mkv"
+    assert _default_output_path(Path("capture.avi"), "archive_hq").suffix == ".mp4"
+    assert _default_output_path(Path("capture.avi"), None).suffix == ".mp4"
+    assert _default_output_path(Path("capture.avi"), "dvd").suffix == ".mpg"
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow()

@@ -36,17 +36,19 @@ def _option(args: list[str], name: str) -> str:
     return args[index + 1]
 
 
-def test_archive_hq_uses_lossless_ffv1_in_matroska_with_flac_audio():
+def test_archive_hq_uses_high_quality_h264_mp4():
     args = build_encode_args(
         "archive_hq",
         _analysis(),
         _settings("archive_hq"),
     )
 
-    assert _option(args, "-f") == "matroska"
-    assert _option(args, "-c:v") == "ffv1"
-    assert _option(args, "-c:a") == "flac"
-    assert "-crf" not in args
+    assert _option(args, "-f") == "mp4"
+    assert _option(args, "-c:v") == "libx264"
+    assert _option(args, "-crf") == "14"
+    assert _option(args, "-c:a") == "aac"
+    assert _option(args, "-pix_fmt") == "yuv420p"
+    assert _option(args, "-movflags") == "+faststart"
 
 
 def test_archive_practical_uses_high_quality_h264_and_aac():

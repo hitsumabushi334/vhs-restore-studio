@@ -79,9 +79,9 @@ def _project_root() -> Path:
 def _playable_output_extension(profile: str | None) -> str:
     """Return a Windows-friendly default suffix for the encode profile."""
 
-    if profile in {"compatibility", "archive_practical"}:
-        return ".mp4"
-    return ".mkv"
+    if profile == "dvd":
+        return ".mpg"
+    return ".mp4"
 
 
 def _default_output_path(
@@ -571,8 +571,9 @@ class MainWindow(QMainWindow):
         path = Path(value).expanduser() if value else _default_output_path(source, profile)
         if path.exists() and path.is_dir():
             path = path / f"{source.stem}_restored{_playable_output_extension(profile)}"
-        if _playable_output_extension(profile) == ".mp4" and path.suffix.casefold() != ".mp4":
-            path = path.with_suffix(".mp4")
+        wanted = _playable_output_extension(profile)
+        if path.suffix.casefold() != wanted:
+            path = path.with_suffix(wanted)
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -699,7 +700,7 @@ class MainWindow(QMainWindow):
             self,
             "Choose output file",
             default_path,
-            "Video files (*.mkv *.mp4 *.mov);;All files (*.*)",
+            "Video files (*.mp4 *.mkv *.mov);;All files (*.*)",
         )
         if path:
             self._using_default_output = False
