@@ -284,7 +284,6 @@ def test_realesrgan_video_input_reports_supported_video_reason(tmp_path: Path):
     )
     analysis = SourceInfo(path=source, duration=60.0, width=720, height=480)
     runner = RestoreJobRunner()
-    runner._upscale_backend = None
 
     with patch(
         "vhs_restore.upscale.realesrgan.find_tool",
